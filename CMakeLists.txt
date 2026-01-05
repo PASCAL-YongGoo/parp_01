@@ -2,8 +2,8 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
-# Add custom board directory
-set(BOARD_ROOT ${CMAKE_CURRENT_LIST_DIR})
+# Add custom board directory (use list(APPEND) for compatibility with other board roots)
+list(APPEND BOARD_ROOT ${CMAKE_CURRENT_LIST_DIR})
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(parp_01)

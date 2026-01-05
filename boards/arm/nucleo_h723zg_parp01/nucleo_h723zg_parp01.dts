@@ -92,36 +92,41 @@
 	status = "okay";
 };
 
-/* PLL Configuration - 400MHz SYSCLK (Stable Configuration)
+/* PLL Configuration - 275MHz SYSCLK (Maximum Safe for STM32H723)
  *
- * Conservative 400MHz setting for stability:
+ * STM32H723 Maximum Frequencies (from clock_stm32_ll_h7.c):
+ *   - SYSCLK max: 550 MHz
+ *   - AHB max: 275 MHz
+ *   - APBx max: 137.5 MHz
+ *
+ * Configuration:
  *   HSE = 8MHz external crystal
- *   M=4 -> VCO input = 2MHz -> MEDIUM VCO range (150-420MHz)
- *   N=200 -> VCO output = 400MHz -> Within MEDIUM range (safe)
- *   P=1 -> SYSCLK = 400MHz
- *   Q=4 -> 100MHz output for peripherals
- *   R=2 -> 200MHz output
+ *   M=4 -> VCO input = 2MHz
+ *   N=275 -> VCO output = 550MHz
+ *   P=2 -> SYSCLK = 275MHz (AHB limit)
+ *   Q=4 -> 137.5MHz output for peripherals
+ *   R=2 -> 275MHz output
  */
 &pll {
 	div-m = <4>;
-	mul-n = <200>;
-	div-p = <1>;
+	mul-n = <275>;
+	div-p = <2>;
 	div-q = <4>;
 	div-r = <2>;
 	clocks = <&clk_hse>;
 	status = "okay";
 };
 
-/* RCC Configuration for 400MHz SYSCLK */
+/* RCC Configuration for 275MHz SYSCLK */
 &rcc {
 	clocks = <&pll>;
-	clock-frequency = <DT_FREQ_M(400)>;
+	clock-frequency = <DT_FREQ_M(275)>;
 	d1cpre = <1>;
-	hpre = <2>;    /* HCLK: 200 MHz */
-	d1ppre = <2>;  /* APB1: 100 MHz */
-	d2ppre1 = <2>; /* APB2: 100 MHz */
-	d2ppre2 = <2>; /* APB3: 100 MHz */
-	d3ppre = <2>;  /* APB4: 100 MHz */
+	hpre = <1>;    /* HCLK: 275 MHz (matches CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, at AHB limit) */
+	d1ppre = <2>;  /* APB1: 137.5 MHz (at APBx limit) */
+	d2ppre1 = <2>; /* APB2: 137.5 MHz (at APBx limit) */
+	d2ppre2 = <2>; /* APB3: 137.5 MHz (at APBx limit) */
+	d3ppre = <2>;  /* APB4: 137.5 MHz (at APBx limit) */
 };
 
 /* Power supply configuration */

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# 400MHz System Clock
-CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=400000000
+# 275MHz System Clock (Maximum safe for STM32H723 AHB bus)
+CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=275000000
 
 # Enable MPU
 CONFIG_ARM_MPU=y
@@ -28,7 +28,4 @@ CONFIG_UART_CONSOLE=y
 
 # Enable printf/printk
 CONFIG_PRINTK=y
-CONFIG_EARLY_CONSOLE=y
-
-# Enable shell
-CONFIG_SHELL=y
+# CONFIG_EARLY_CONSOLE is not set (custom pins need pinctrl init first)
