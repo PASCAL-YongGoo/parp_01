@@ -1,0 +1,60 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/lyg/work/zephyr_ws/zephyrproject/apps/parp_01",
+        "/home/lyg/work/zephyr_ws/zephyrproject/zephyr",
+        "/home/lyg/work/zephyr_ws/zephyrproject/build"
+      ],
+      "description": "Efficient file system access to project, Zephyr source (read-only reference), and build output. Reduces token usage by using native file operations."
+    },
+    "git": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-git",
+        "--repository",
+        "/home/lyg/work/zephyr_ws/zephyrproject/apps/parp_01"
+      ],
+      "description": "Git operations for this project's repository. Tracks changes to custom board definition and application code."
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "description": "GitHub integration for repository management, PRs, and issues. Works with gh CLI if available."
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "description": "Structured thinking for complex embedded systems problems: clock configuration, DTS design, peripheral setup, and debugging."
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "description": "Persistent memory across sessions. Stores hardware pin mappings, peripheral configurations, build settings, and troubleshooting solutions."
+    },
+    "puppeteer": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-puppeteer"
+      ],
+      "description": "Web automation and PDF reading. Fetches STM32H723 datasheets, reference manuals, Zephyr documentation, and peripheral app notes."
+    }
+  }
+}
