@@ -1,0 +1,6 @@
+board:
+  name: nucleo_h723zg_parp01
+  full_name: PARP-01 Custom Board (STM32H723ZG)
+  vendor: custom
+  socs:
+    - name: stm32h723xx

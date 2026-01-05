@@ -1,0 +1,12 @@
+# Copyright (c) 2025 PARP-01 Project
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_NUCLEO_H723ZG_PARP01
+
+config BOARD
+	default "nucleo_h723zg_parp01"
+
+config BUILD_OUTPUT_BIN
+	default y
+
+endif # BOARD_NUCLEO_H723ZG_PARP01

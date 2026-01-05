@@ -1,0 +1,27 @@
+# Build directory
+build/
+
+# Zephyr build artifacts
+*.o
+*.a
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
