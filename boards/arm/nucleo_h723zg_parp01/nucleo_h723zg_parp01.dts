@@ -9,8 +9,8 @@
 	compatible = "st,nucleo-h723zg-parp01";
 
 	chosen {
-		zephyr,console = &usart1;
-		zephyr,shell-uart = &usart1;
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,dtcm = &dtcm;
@@ -187,6 +187,20 @@ zephyr_udc0: &usbotg_hs {
 	pinctrl-0 = <&usb_otg_hs_dm_pa11 &usb_otg_hs_dp_pa12>;
 	pinctrl-names = "default";
 	status = "okay";
+
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+
+	hid_0: hid_0 {
+		compatible = "zephyr,hid-device";
+		label = "HID_KEYBOARD";
+		protocol-code = "keyboard";
+		in-report-size = <8>;
+		out-report-size = <1>;
+		in-polling-period-us = <1000>;
+		out-polling-period-us = <1000>;
+	};
 };
 
 /* RTC with LSE as clock source */

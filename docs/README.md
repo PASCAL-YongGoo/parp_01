@@ -10,9 +10,25 @@ This directory contains all project documentation organized by topic.
   - Tracks accomplishments, issues, and next steps
   - Essential for resuming work on different machines
 
+### Design Documents
+- **[RFID_SYSTEM_DESIGN.md](RFID_SYSTEM_DESIGN.md)**: Complete system architecture and implementation plan
+  - System overview and operating modes
+  - Detailed component design (UART router, EPC parser, USB HID)
+  - Data flow diagrams
+  - Implementation phases with timelines
+  - Memory budget and performance targets
+  - **START HERE** for understanding the system architecture
+
+- **[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)**: General feature implementation roadmap
+  - Available hardware resources
+  - Feature priorities and phases
+  - Memory usage estimates
+  - Testing strategy
+
 ### Future Documents
 As the project grows, add documentation here:
 - Hardware schematics and pin mappings
+- RFID protocol specification
 - API documentation
 - Performance benchmarks
 - Testing procedures

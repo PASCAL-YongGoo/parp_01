@@ -8,4 +8,11 @@ list(APPEND BOARD_ROOT ${CMAKE_CURRENT_LIST_DIR})
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(parp_01)
 
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE
+	src/main.c
+	src/e310_protocol.c
+	src/e310_test.c
+	src/uart_router.c
+	src/usb_hid.c
+	src/usb_device.c
+)
