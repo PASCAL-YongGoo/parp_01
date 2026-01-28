@@ -224,12 +224,150 @@ static void test_parse_reader_info(void)
 }
 
 /**
+ * @brief Test building Read Data command
+ */
+static void test_build_read_data(void)
+{
+	LOG_INF("=== Testing Read Data Command ===");
+
+	e310_context_t ctx;
+	e310_init(&ctx, E310_ADDR_DEFAULT);
+
+	e310_read_params_t params = {
+		.epc = {0xE2, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22},
+		.epc_len = 12,
+		.mem_bank = E310_MEMBANK_USER,
+		.word_ptr = 0,
+		.word_count = 4,
+		.password = {0x00, 0x00, 0x00, 0x00},
+	};
+
+	int len = e310_build_read_data(&ctx, &params);
+
+	print_hex_dump("Read Data (User Bank, 4 words)", ctx.tx_buffer, len);
+	LOG_INF("Command: %s", e310_get_command_name(E310_CMD_READ_DATA));
+	LOG_INF("Frame length: %d bytes", len);
+}
+
+/**
+ * @brief Test building Write Data command
+ */
+static void test_build_write_data(void)
+{
+	LOG_INF("=== Testing Write Data Command ===");
+
+	e310_context_t ctx;
+	e310_init(&ctx, E310_ADDR_DEFAULT);
+
+	e310_write_params_t params = {
+		.epc = {0xE2, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22},
+		.epc_len = 12,
+		.mem_bank = E310_MEMBANK_USER,
+		.word_ptr = 0,
+		.data = {0x11, 0x22, 0x33, 0x44},
+		.word_count = 2,
+		.password = {0x00, 0x00, 0x00, 0x00},
+	};
+
+	int len = e310_build_write_data(&ctx, &params);
+
+	print_hex_dump("Write Data (User Bank, 2 words)", ctx.tx_buffer, len);
+	LOG_INF("Command: %s", e310_get_command_name(E310_CMD_WRITE_DATA));
+	LOG_INF("Frame length: %d bytes", len);
+}
+
+/**
+ * @brief Test building Modify RF Power command
+ */
+static void test_build_modify_rf_power(void)
+{
+	LOG_INF("=== Testing Modify RF Power Command ===");
+
+	e310_context_t ctx;
+	e310_init(&ctx, E310_ADDR_DEFAULT);
+
+	int len = e310_build_modify_rf_power(&ctx, 20);
+
+	print_hex_dump("Modify RF Power (20 dBm)", ctx.tx_buffer, len);
+	LOG_INF("Command: %s", e310_get_command_name(E310_CMD_MODIFY_RF_POWER));
+	LOG_INF("Frame length: %d bytes", len);
+}
+
+/**
+ * @brief Test building Select command
+ */
+static void test_build_select(void)
+{
+	LOG_INF("=== Testing Select Command ===");
+
+	e310_context_t ctx;
+	e310_init(&ctx, E310_ADDR_DEFAULT);
+
+	e310_select_params_t params = {
+		.sel_param = 0x00,
+		.truncate = 0x00,
+		.target = E310_TARGET_A,
+		.action = 0x00,
+		.mem_bank = E310_MEMBANK_EPC,
+		.pointer = 0x20,   /* Start at EPC data (skip PC+CRC) */
+		.mask_len = 96,    /* 12 bytes = 96 bits */
+		.mask = {0xE2, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22},
+	};
+
+	int len = e310_build_select(&ctx, &params);
+
+	print_hex_dump("Select (EPC mask)", ctx.tx_buffer, len);
+	LOG_INF("Frame length: %d bytes", len);
+}
+
+/**
+ * @brief Test building simple commands
+ */
+static void test_build_simple_commands(void)
+{
+	LOG_INF("=== Testing Simple Commands ===");
+
+	e310_context_t ctx;
+	e310_init(&ctx, E310_ADDR_DEFAULT);
+
+	int len;
+
+	len = e310_build_single_tag_inventory(&ctx);
+	LOG_INF("Single Tag Inventory: %d bytes", len);
+
+	len = e310_build_obtain_reader_sn(&ctx);
+	LOG_INF("Obtain Reader SN: %d bytes", len);
+
+	len = e310_build_get_tag_count(&ctx);
+	LOG_INF("Get Tag Count: %d bytes", len);
+
+	len = e310_build_clear_memory_buffer(&ctx);
+	LOG_INF("Clear Memory Buffer: %d bytes", len);
+
+	len = e310_build_measure_temperature(&ctx);
+	LOG_INF("Measure Temperature: %d bytes", len);
+}
+
+/**
+ * @brief Test error description function
+ */
+static void test_error_descriptions(void)
+{
+	LOG_INF("=== Testing Error Descriptions ===");
+
+	LOG_INF("E310_OK: %s", e310_get_error_desc(E310_OK));
+	LOG_INF("E310_ERR_CRC_FAILED: %s", e310_get_error_desc(E310_ERR_CRC_FAILED));
+	LOG_INF("E310_ERR_BUFFER_OVERFLOW: %s", e310_get_error_desc(E310_ERR_BUFFER_OVERFLOW));
+	LOG_INF("Unknown error (-99): %s", e310_get_error_desc(-99));
+}
+
+/**
  * @brief Run all E310 protocol library tests
  */
 void e310_run_tests(void)
 {
 	LOG_INF("========================================");
-	LOG_INF("  E310 Protocol Library Tests");
+	LOG_INF("  E310 Protocol Library Tests (v2)");
 	LOG_INF("========================================\n");
 
 	test_crc16();
@@ -251,6 +389,25 @@ void e310_run_tests(void)
 	LOG_INF("");
 
 	test_parse_reader_info();
+	LOG_INF("");
+
+	/* New tests for v2 */
+	test_build_read_data();
+	LOG_INF("");
+
+	test_build_write_data();
+	LOG_INF("");
+
+	test_build_modify_rf_power();
+	LOG_INF("");
+
+	test_build_select();
+	LOG_INF("");
+
+	test_build_simple_commands();
+	LOG_INF("");
+
+	test_error_descriptions();
 	LOG_INF("");
 
 	LOG_INF("========================================");

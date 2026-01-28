@@ -37,6 +37,30 @@ extern "C" {
 #define UART_ROUTER_PROCESS_TIMEOUT 10
 
 /* ========================================================================
+ * Frame Assembler (for E310 protocol frames)
+ * ======================================================================== */
+
+/** Frame assembler state */
+typedef enum {
+	FRAME_STATE_WAIT_LEN,    /**< Waiting for first byte (length) */
+	FRAME_STATE_RECEIVING,   /**< Receiving frame data */
+	FRAME_STATE_COMPLETE,    /**< Frame complete */
+} frame_state_t;
+
+/**
+ * @brief Frame assembler for E310 protocol
+ *
+ * Assembles bytes from UART into complete E310 frames.
+ */
+typedef struct {
+	uint8_t buffer[E310_MAX_FRAME_SIZE]; /**< Frame buffer */
+	size_t  received;                     /**< Bytes received so far */
+	size_t  expected;                     /**< Expected frame length */
+	frame_state_t state;                  /**< Current state */
+	int64_t last_byte_time;              /**< Timestamp of last byte (for timeout) */
+} frame_assembler_t;
+
+/* ========================================================================
  * Operating Modes
  * ======================================================================== */
 
@@ -85,22 +109,29 @@ typedef struct {
 	router_mode_t mode;          /**< Current operating mode */
 	struct k_mutex mode_lock;    /**< Mode change protection */
 
-	/* Ring buffers for data routing */
+	/* Ring buffers for data routing (RX and TX) */
 	struct ring_buf uart1_rx_ring;  /**< UART1 RX ring buffer */
+	struct ring_buf uart1_tx_ring;  /**< UART1 TX ring buffer */
 	struct ring_buf uart4_rx_ring;  /**< UART4 RX ring buffer */
+	struct ring_buf uart4_tx_ring;  /**< UART4 TX ring buffer */
 	uint8_t uart1_rx_buf[UART_ROUTER_BUF_SIZE];  /**< UART1 RX buffer storage */
+	uint8_t uart1_tx_buf[UART_ROUTER_BUF_SIZE];  /**< UART1 TX buffer storage */
 	uint8_t uart4_rx_buf[UART_ROUTER_BUF_SIZE];  /**< UART4 RX buffer storage */
+	uint8_t uart4_tx_buf[UART_ROUTER_BUF_SIZE];  /**< UART4 TX buffer storage */
 
 	/* E310 protocol context (for inventory mode) */
 	e310_context_t e310_ctx;     /**< E310 protocol handler */
+	frame_assembler_t e310_frame; /**< E310 frame assembler */
 
 	/* Statistics */
 	uart_router_stats_t stats;   /**< Router statistics */
 
 	/* State flags */
 	bool running;                /**< Router is running */
-	bool uart1_ready;            /**< UART1 is ready */
-	bool uart4_ready;            /**< UART4 is ready */
+	bool uart1_ready;            /**< UART1 device is ready */
+	bool uart4_ready;            /**< UART4 device is ready */
+	bool host_connected;         /**< USB host has opened port (DTR high) */
+	bool inventory_active;       /**< E310 inventory is running */
 
 } uart_router_t;
 
@@ -213,6 +244,87 @@ int uart_router_send_uart4(uart_router_t *router, const uint8_t *data, size_t le
  * @return Human-readable mode name
  */
 const char *uart_router_get_mode_name(router_mode_t mode);
+
+/**
+ * @brief Check and update USB host connection status
+ *
+ * Checks the DTR (Data Terminal Ready) line control signal to determine
+ * if the USB host has opened the CDC ACM port.
+ *
+ * @param router Pointer to router context
+ * @return true if host is connected (DTR high), false otherwise
+ */
+bool uart_router_check_host_connection(uart_router_t *router);
+
+/**
+ * @brief Check if USB host is connected
+ *
+ * @param router Pointer to router context
+ * @return true if host is connected, false otherwise
+ */
+bool uart_router_is_host_connected(uart_router_t *router);
+
+/**
+ * @brief Wait for USB host connection with timeout
+ *
+ * Blocks until the USB host connects or timeout expires.
+ *
+ * @param router Pointer to router context
+ * @param timeout_ms Timeout in milliseconds (0 = no wait, -1 = forever)
+ * @return 0 if connected, -ETIMEDOUT if timeout
+ */
+int uart_router_wait_host_connection(uart_router_t *router, int32_t timeout_ms);
+
+/* ========================================================================
+ * E310 RFID Control API
+ * ======================================================================== */
+
+/**
+ * @brief Start E310 Fast Inventory
+ *
+ * Sends Start Fast Inventory command to E310 and sets mode to INVENTORY.
+ *
+ * @param router Pointer to router context
+ * @return 0 on success, negative errno on error
+ */
+int uart_router_start_inventory(uart_router_t *router);
+
+/**
+ * @brief Stop E310 Fast Inventory
+ *
+ * Sends Stop Fast Inventory command to E310 and sets mode to IDLE.
+ *
+ * @param router Pointer to router context
+ * @return 0 on success, negative errno on error
+ */
+int uart_router_stop_inventory(uart_router_t *router);
+
+/**
+ * @brief Set E310 RF Power
+ *
+ * @param router Pointer to router context
+ * @param power RF power level (0-30 dBm)
+ * @return 0 on success, negative errno on error
+ */
+int uart_router_set_rf_power(uart_router_t *router, uint8_t power);
+
+/**
+ * @brief Request E310 Reader Information
+ *
+ * Sends Obtain Reader Info command to E310.
+ *
+ * @param router Pointer to router context
+ * @return 0 on success, negative errno on error
+ */
+int uart_router_get_reader_info(uart_router_t *router);
+
+/**
+ * @brief Check if inventory is active
+ *
+ * @param router Pointer to router context
+ * @return true if inventory is running, false otherwise
+ */
+bool uart_router_is_inventory_active(uart_router_t *router);
 
 /** @} */ /* End of uart_router group */
 

@@ -416,6 +416,70 @@ typedef struct {
 } e310_inventory_params_t;
 
 /**
+ * @brief Read Data parameters for 0x02 command
+ */
+typedef struct {
+	uint8_t epc[E310_MAX_EPC_LENGTH];  /**< Target tag EPC */
+	uint8_t epc_len;                    /**< EPC length in bytes (0 = use mask) */
+	uint8_t mem_bank;                   /**< Memory bank (0x00-0x03) */
+	uint8_t word_ptr;                   /**< Start word address */
+	uint8_t word_count;                 /**< Number of words to read (1-120) */
+	uint8_t password[4];                /**< Access password */
+	/* Mask options (used when epc_len == 0 or 0xFF) */
+	uint8_t mask_mem;                   /**< Mask memory bank */
+	uint16_t mask_addr;                 /**< Mask start bit address */
+	uint8_t mask_len;                   /**< Mask bit length */
+	uint8_t mask_data[E310_MAX_MASK_LENGTH]; /**< Mask data */
+} e310_read_params_t;
+
+/**
+ * @brief Read Data response structure
+ */
+typedef struct {
+	uint8_t data[240];          /**< Read data (max 120 words = 240 bytes) */
+	uint8_t word_count;         /**< Number of words read */
+	uint8_t status;             /**< Response status code */
+} e310_read_response_t;
+
+/**
+ * @brief Write Data parameters for 0x03 command
+ */
+typedef struct {
+	uint8_t epc[E310_MAX_EPC_LENGTH];  /**< Target tag EPC */
+	uint8_t epc_len;                    /**< EPC length in bytes */
+	uint8_t mem_bank;                   /**< Memory bank (0x00-0x03) */
+	uint8_t word_ptr;                   /**< Start word address */
+	uint8_t data[240];                  /**< Data to write */
+	uint8_t word_count;                 /**< Number of words to write */
+	uint8_t password[4];                /**< Access password */
+} e310_write_params_t;
+
+/**
+ * @brief Select command parameters for 0x9A command
+ */
+typedef struct {
+	uint8_t sel_param;          /**< Select parameter (0x00-0x03) */
+	uint8_t truncate;           /**< Truncation setting */
+	uint8_t target;             /**< Target (Session flag) */
+	uint8_t action;             /**< Action code (0x00-0x07) */
+	uint8_t mem_bank;           /**< Memory bank for matching */
+	uint16_t pointer;           /**< Bit pointer */
+	uint8_t mask_len;           /**< Mask length in bits */
+	uint8_t mask[E310_MAX_MASK_LENGTH]; /**< Mask data */
+} e310_select_params_t;
+
+/**
+ * @brief Write EPC parameters for 0x04 command
+ */
+typedef struct {
+	uint8_t old_epc[E310_MAX_EPC_LENGTH]; /**< Current EPC */
+	uint8_t old_epc_len;                   /**< Current EPC length */
+	uint8_t new_epc[E310_MAX_EPC_LENGTH]; /**< New EPC to write */
+	uint8_t new_epc_len;                   /**< New EPC length */
+	uint8_t password[4];                   /**< Access password */
+} e310_write_epc_params_t;
+
+/**
  * @brief E310 protocol context
  */
 typedef struct {
@@ -546,6 +610,99 @@ int e310_build_obtain_reader_info(e310_context_t *ctx);
  */
 int e310_build_stop_immediately(e310_context_t *ctx);
 
+/**
+ * @brief Build "Read Data" command (0x02)
+ *
+ * @param ctx Context
+ * @param params Read parameters
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_read_data(e310_context_t *ctx, const e310_read_params_t *params);
+
+/**
+ * @brief Build "Write Data" command (0x03)
+ *
+ * @param ctx Context
+ * @param params Write parameters
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_write_data(e310_context_t *ctx, const e310_write_params_t *params);
+
+/**
+ * @brief Build "Write EPC" command (0x04)
+ *
+ * @param ctx Context
+ * @param params Write EPC parameters
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_write_epc(e310_context_t *ctx, const e310_write_epc_params_t *params);
+
+/**
+ * @brief Build "Modify RF Power" command (0x2F)
+ *
+ * @param ctx Context
+ * @param power RF power level (0-30 dBm)
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_modify_rf_power(e310_context_t *ctx, uint8_t power);
+
+/**
+ * @brief Build "Select" command (0x9A)
+ *
+ * @param ctx Context
+ * @param params Select parameters
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_select(e310_context_t *ctx, const e310_select_params_t *params);
+
+/**
+ * @brief Build "Single Tag Inventory" command (0x0F)
+ *
+ * @param ctx Context
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_single_tag_inventory(e310_context_t *ctx);
+
+/**
+ * @brief Build "Obtain Reader SN" command (0x4C)
+ *
+ * @param ctx Context
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_obtain_reader_sn(e310_context_t *ctx);
+
+/**
+ * @brief Build "Get Data From Buffer" command (0x72)
+ *
+ * @param ctx Context
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_get_data_from_buffer(e310_context_t *ctx);
+
+/**
+ * @brief Build "Clear Memory Buffer" command (0x73)
+ *
+ * @param ctx Context
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_clear_memory_buffer(e310_context_t *ctx);
+
+/**
+ * @brief Build "Get Tag Count From Buffer" command (0x74)
+ *
+ * @param ctx Context
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_get_tag_count(e310_context_t *ctx);
+
+/**
+ * @brief Build "Measure Temperature" command (0x92)
+ *
+ * @param ctx Context
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_measure_temperature(e310_context_t *ctx);
+
 /* ========================================================================
  * Response Parsers
  * ======================================================================== */
@@ -592,6 +749,37 @@ int e310_parse_reader_info(const uint8_t *data, size_t length,
  */
 int e310_parse_auto_upload_tag(const uint8_t *data, size_t length,
                                  e310_tag_data_t *tag);
+
+/**
+ * @brief Parse Read Data response (0x02)
+ *
+ * @param data Response data field
+ * @param length Data length
+ * @param response Output: read response data
+ * @return E310_OK on success, negative error code otherwise
+ */
+int e310_parse_read_response(const uint8_t *data, size_t length,
+                               e310_read_response_t *response);
+
+/**
+ * @brief Parse Tag Count response (0x74)
+ *
+ * @param data Response data field
+ * @param length Data length
+ * @param count Output: tag count
+ * @return E310_OK on success, negative error code otherwise
+ */
+int e310_parse_tag_count(const uint8_t *data, size_t length, uint32_t *count);
+
+/**
+ * @brief Parse Temperature response (0x92)
+ *
+ * @param data Response data field
+ * @param length Data length
+ * @param temperature Output: temperature in Celsius
+ * @return E310_OK on success, negative error code otherwise
+ */
+int e310_parse_temperature(const uint8_t *data, size_t length, int8_t *temperature);
 
 /* ========================================================================
  * Utility Functions

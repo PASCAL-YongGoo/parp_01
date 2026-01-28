@@ -60,6 +60,7 @@
 		testled = &test_led;
 		sw0 = &sw0;
 		sw1 = &sw1;
+		eeprom-0 = &eeprom0;
 	};
 };
 

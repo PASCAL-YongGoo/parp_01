@@ -254,16 +254,53 @@ int e310_parse_tag_data(const uint8_t *data, size_t length, e310_tag_data_t *tag
 	}
 
 	/* Parse EPC/TID data */
-	if (epc_tid_combined) {
-		/* Data contains both EPC and TID - need to parse based on protocol */
-		/* For simplicity, treat first part as EPC, rest as TID */
-		/* TODO: Implement proper EPC+TID separation if needed */
-		tag->epc_len = data_bytes;
-		if (tag->epc_len > E310_MAX_EPC_LENGTH) {
-			tag->epc_len = E310_MAX_EPC_LENGTH;
+	if (epc_tid_combined && data_bytes >= 2) {
+		/*
+		 * Data contains both EPC and TID
+		 * Format: [PC(2)] + [EPC(variable)] + [CRC(2)] + [TID(variable)]
+		 *
+		 * PC Word structure (first 2 bytes):
+		 *   - bits 15-11: EPC length in words (multiply by 2 for bytes)
+		 *   - bits 10-8: User memory indicator
+		 *   - bits 7-0: Additional info (XPC, etc.)
+		 *
+		 * Total EPC block = PC(2) + EPC(variable) + CRC(2)
+		 */
+		uint16_t pc_word = ((uint16_t)data[idx] << 8) | data[idx + 1];
+		uint8_t epc_words = (pc_word >> 11) & 0x1F;  /* bits 15-11 */
+		uint8_t epc_bytes = epc_words * 2;           /* Convert to bytes */
+
+		/* EPC block size = PC(2) + EPC + CRC(2) */
+		uint8_t epc_block_size = 2 + epc_bytes + 2;
+
+		if (epc_block_size <= data_bytes) {
+			/* Copy EPC (skip PC, include actual EPC data) */
+			tag->epc_len = epc_bytes;
+			if (tag->epc_len > E310_MAX_EPC_LENGTH) {
+				tag->epc_len = E310_MAX_EPC_LENGTH;
+			}
+			memcpy(tag->epc, &data[idx + 2], tag->epc_len);
+
+			/* Copy TID (remaining data after EPC block) */
+			uint8_t tid_offset = epc_block_size;
+			uint8_t tid_len = data_bytes - tid_offset;
+			if (tid_len > 0) {
+				if (tid_len > E310_MAX_TID_LENGTH) {
+					tid_len = E310_MAX_TID_LENGTH;
+				}
+				memcpy(tag->tid, &data[idx + tid_offset], tid_len);
+				tag->tid_len = tid_len;
+				tag->has_tid = true;
+			}
+		} else {
+			/* Fallback: treat all data as EPC */
+			tag->epc_len = data_bytes;
+			if (tag->epc_len > E310_MAX_EPC_LENGTH) {
+				tag->epc_len = E310_MAX_EPC_LENGTH;
+			}
+			memcpy(tag->epc, &data[idx], tag->epc_len);
+			tag->has_tid = false;
 		}
-		memcpy(tag->epc, &data[idx], tag->epc_len);
-		tag->has_tid = false;
 	} else {
 		/* Data contains only EPC */
 		tag->epc_len = data_bytes;
@@ -428,6 +465,21 @@ const char *e310_get_status_desc(uint8_t status)
 	}
 }
 
+const char *e310_get_error_desc(int error_code)
+{
+	switch (error_code) {
+	case E310_OK:                    return "Success";
+	case E310_ERR_FRAME_TOO_SHORT:   return "Frame too short";
+	case E310_ERR_CRC_FAILED:        return "CRC verification failed";
+	case E310_ERR_LENGTH_MISMATCH:   return "Length field mismatch";
+	case E310_ERR_BUFFER_OVERFLOW:   return "Buffer overflow";
+	case E310_ERR_INVALID_PARAM:     return "Invalid parameter";
+	case E310_ERR_MISSING_DATA:      return "Missing required data";
+	case E310_ERR_PARSE_ERROR:       return "Parse error";
+	default:                         return "Unknown error";
+	}
+}
+
 int e310_format_epc_string(const uint8_t *epc, uint8_t epc_len,
                             char *output, size_t output_size)
 {
@@ -452,4 +504,306 @@ int e310_format_epc_string(const uint8_t *epc, uint8_t epc_len,
 
 	output[written] = '\0';
 	return (int)written;
+}
+
+/* ========================================================================
+ * Command Builders - Read/Write Operations
+ * ======================================================================== */
+
+int e310_build_read_data(e310_context_t *ctx, const e310_read_params_t *params)
+{
+	if (!ctx || !params) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	if (params->word_count == 0 || params->word_count > 120) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t data_len;
+	bool use_mask = (params->epc_len == 0 || params->epc_len == 0xFF);
+
+	if (use_mask) {
+		/* Mask mode: ENum(1) + Mem(1) + WordPtr(1) + Num(1) + Pwd(4) + MaskMem(1) + MaskAdr(2) + MaskLen(1) + MaskData */
+		uint8_t mask_bytes = (params->mask_len + 7) / 8;
+		data_len = 1 + 1 + 1 + 1 + 4 + 1 + 2 + 1 + mask_bytes;
+	} else {
+		/* EPC mode: ENum(1) + EPC + Mem(1) + WordPtr(1) + Num(1) + Pwd(4) */
+		data_len = 1 + params->epc_len + 1 + 1 + 1 + 4;
+	}
+
+	if (3 + data_len + 2 > E310_MAX_FRAME_SIZE) {
+		return E310_ERR_BUFFER_OVERFLOW;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_READ_DATA, data_len);
+
+	if (use_mask) {
+		/* Mask mode */
+		ctx->tx_buffer[idx++] = 0xFF;  /* ENum = 0xFF indicates mask mode */
+		ctx->tx_buffer[idx++] = params->mem_bank;
+		ctx->tx_buffer[idx++] = params->word_ptr;
+		ctx->tx_buffer[idx++] = params->word_count;
+		memcpy(&ctx->tx_buffer[idx], params->password, 4);
+		idx += 4;
+		ctx->tx_buffer[idx++] = params->mask_mem;
+		ctx->tx_buffer[idx++] = (uint8_t)(params->mask_addr >> 8);   /* MSB */
+		ctx->tx_buffer[idx++] = (uint8_t)(params->mask_addr & 0xFF); /* LSB */
+		ctx->tx_buffer[idx++] = params->mask_len;
+		uint8_t mask_bytes = (params->mask_len + 7) / 8;
+		if (mask_bytes > 0) {
+			memcpy(&ctx->tx_buffer[idx], params->mask_data, mask_bytes);
+			idx += mask_bytes;
+		}
+	} else {
+		/* EPC mode */
+		uint8_t epc_words = (params->epc_len + 1) / 2;  /* Convert to word count */
+		ctx->tx_buffer[idx++] = epc_words;
+		memcpy(&ctx->tx_buffer[idx], params->epc, params->epc_len);
+		idx += params->epc_len;
+		ctx->tx_buffer[idx++] = params->mem_bank;
+		ctx->tx_buffer[idx++] = params->word_ptr;
+		ctx->tx_buffer[idx++] = params->word_count;
+		memcpy(&ctx->tx_buffer[idx], params->password, 4);
+		idx += 4;
+	}
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_write_data(e310_context_t *ctx, const e310_write_params_t *params)
+{
+	if (!ctx || !params) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	if (params->word_count == 0 || params->word_count > 120) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	/* Data: WNum(1) + ENum(1) + EPC + Mem(1) + WordPtr(1) + WriteData + Pwd(4) */
+	uint8_t epc_words = (params->epc_len + 1) / 2;
+	uint8_t write_bytes = params->word_count * 2;
+	size_t data_len = 1 + 1 + params->epc_len + 1 + 1 + write_bytes + 4;
+
+	if (3 + data_len + 2 > E310_MAX_FRAME_SIZE) {
+		return E310_ERR_BUFFER_OVERFLOW;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_WRITE_DATA, data_len);
+
+	ctx->tx_buffer[idx++] = params->word_count;  /* WNum */
+	ctx->tx_buffer[idx++] = epc_words;           /* ENum */
+	memcpy(&ctx->tx_buffer[idx], params->epc, params->epc_len);
+	idx += params->epc_len;
+	ctx->tx_buffer[idx++] = params->mem_bank;
+	ctx->tx_buffer[idx++] = params->word_ptr;
+	memcpy(&ctx->tx_buffer[idx], params->data, write_bytes);
+	idx += write_bytes;
+	memcpy(&ctx->tx_buffer[idx], params->password, 4);
+	idx += 4;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_write_epc(e310_context_t *ctx, const e310_write_epc_params_t *params)
+{
+	if (!ctx || !params) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	/* Data: ENum(1) + OldEPC + NewEPCLen(1) + NewEPC + Pwd(4) */
+	uint8_t old_epc_words = (params->old_epc_len + 1) / 2;
+	uint8_t new_epc_words = (params->new_epc_len + 1) / 2;
+	size_t data_len = 1 + params->old_epc_len + 1 + params->new_epc_len + 4;
+
+	if (3 + data_len + 2 > E310_MAX_FRAME_SIZE) {
+		return E310_ERR_BUFFER_OVERFLOW;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_WRITE_EPC, data_len);
+
+	ctx->tx_buffer[idx++] = old_epc_words;
+	memcpy(&ctx->tx_buffer[idx], params->old_epc, params->old_epc_len);
+	idx += params->old_epc_len;
+	ctx->tx_buffer[idx++] = new_epc_words;
+	memcpy(&ctx->tx_buffer[idx], params->new_epc, params->new_epc_len);
+	idx += params->new_epc_len;
+	memcpy(&ctx->tx_buffer[idx], params->password, 4);
+	idx += 4;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_modify_rf_power(e310_context_t *ctx, uint8_t power)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	if (power > 30) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_MODIFY_RF_POWER, 1);
+	ctx->tx_buffer[idx++] = power;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_select(e310_context_t *ctx, const e310_select_params_t *params)
+{
+	if (!ctx || !params) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	/* Data: SelParam(1) + Truncate(1) + Target(1) + Action(1) + MemBank(1) + Pointer(2) + Length(1) + Mask */
+	uint8_t mask_bytes = (params->mask_len + 7) / 8;
+	size_t data_len = 1 + 1 + 1 + 1 + 1 + 2 + 1 + mask_bytes;
+
+	if (3 + data_len + 2 > E310_MAX_FRAME_SIZE) {
+		return E310_ERR_BUFFER_OVERFLOW;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, 0x9A, data_len);
+
+	ctx->tx_buffer[idx++] = params->sel_param;
+	ctx->tx_buffer[idx++] = params->truncate;
+	ctx->tx_buffer[idx++] = params->target;
+	ctx->tx_buffer[idx++] = params->action;
+	ctx->tx_buffer[idx++] = params->mem_bank;
+	ctx->tx_buffer[idx++] = (uint8_t)(params->pointer >> 8);   /* MSB */
+	ctx->tx_buffer[idx++] = (uint8_t)(params->pointer & 0xFF); /* LSB */
+	ctx->tx_buffer[idx++] = params->mask_len;
+	if (mask_bytes > 0) {
+		memcpy(&ctx->tx_buffer[idx], params->mask, mask_bytes);
+		idx += mask_bytes;
+	}
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+/* ========================================================================
+ * Command Builders - Simple Commands
+ * ======================================================================== */
+
+int e310_build_single_tag_inventory(e310_context_t *ctx)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_SINGLE_TAG_INVENTORY, 0);
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_obtain_reader_sn(e310_context_t *ctx)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_OBTAIN_READER_SN, 0);
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_get_data_from_buffer(e310_context_t *ctx)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_GET_DATA_FROM_BUFFER, 0);
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_clear_memory_buffer(e310_context_t *ctx)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_CLEAR_MEMORY_BUFFER, 0);
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_get_tag_count(e310_context_t *ctx)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_GET_TAG_COUNT_FROM_BUFFER, 0);
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_measure_temperature(e310_context_t *ctx)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, 0x92, 0);
+	return e310_finalize_frame(ctx, idx);
+}
+
+/* ========================================================================
+ * Response Parsers - Additional
+ * ======================================================================== */
+
+int e310_parse_read_response(const uint8_t *data, size_t length,
+                               e310_read_response_t *response)
+{
+	if (!data || !response) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	memset(response, 0, sizeof(e310_read_response_t));
+
+	if (length == 0) {
+		return E310_ERR_MISSING_DATA;
+	}
+
+	/* Data is word-aligned, copy directly */
+	size_t bytes_to_copy = length;
+	if (bytes_to_copy > sizeof(response->data)) {
+		bytes_to_copy = sizeof(response->data);
+	}
+
+	memcpy(response->data, data, bytes_to_copy);
+	response->word_count = (bytes_to_copy + 1) / 2;
+
+	return E310_OK;
+}
+
+int e310_parse_tag_count(const uint8_t *data, size_t length, uint32_t *count)
+{
+	if (!data || !count) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	if (length < 2) {
+		return E310_ERR_FRAME_TOO_SHORT;
+	}
+
+	/* Tag count is 2 bytes, little-endian */
+	*count = data[0] | ((uint32_t)data[1] << 8);
+
+	return E310_OK;
+}
+
+int e310_parse_temperature(const uint8_t *data, size_t length, int8_t *temperature)
+{
+	if (!data || !temperature) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	if (length < 1) {
+		return E310_ERR_FRAME_TOO_SHORT;
+	}
+
+	/* Temperature is signed 8-bit value */
+	*temperature = (int8_t)data[0];
+
+	return E310_OK;
 }

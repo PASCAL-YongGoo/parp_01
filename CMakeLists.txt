@@ -15,4 +15,7 @@ target_sources(app PRIVATE
 	src/uart_router.c
 	src/usb_hid.c
 	src/usb_device.c
+	src/switch_control.c
+	src/shell_login.c
+	src/password_storage.c
 )

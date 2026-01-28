@@ -12,6 +12,22 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+/* ========================================================================
+ * Typing Speed Configuration
+ * ======================================================================== */
+
+/** Minimum typing speed in CPM (Characters Per Minute) */
+#define HID_TYPING_SPEED_MIN     100
+
+/** Maximum typing speed in CPM */
+#define HID_TYPING_SPEED_MAX     1500
+
+/** Default typing speed in CPM (~600 CPM = 10 chars/sec) */
+#define HID_TYPING_SPEED_DEFAULT 600
+
+/** Typing speed step size */
+#define HID_TYPING_SPEED_STEP    100
+
 /**
  * @brief Initialize USB HID Keyboard
  *
@@ -20,7 +36,7 @@
  *
  * @return 0 on success, negative error code on failure
  */
-int usb_hid_init(void);
+int parp_usb_hid_init(void);
 
 /**
  * @brief Send EPC string as keyboard input (uppercase only)
@@ -45,5 +61,23 @@ int usb_hid_send_epc(const uint8_t *epc, size_t len);
  * @return true if HID device is ready, false otherwise
  */
 bool usb_hid_is_ready(void);
+
+/**
+ * @brief Set HID keyboard typing speed
+ *
+ * Sets the typing speed for EPC output. Speed is specified in CPM
+ * (Characters Per Minute) and will be rounded to nearest 100.
+ *
+ * @param cpm Typing speed in CPM (100-1500, step 100)
+ * @return 0 on success, -EINVAL if out of range
+ */
+int usb_hid_set_typing_speed(uint16_t cpm);
+
+/**
+ * @brief Get current HID keyboard typing speed
+ *
+ * @return Current typing speed in CPM
+ */
+uint16_t usb_hid_get_typing_speed(void);
 
 #endif /* USB_HID_H */
