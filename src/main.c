@@ -20,6 +20,8 @@
 #include "switch_control.h"
 #include "shell_login.h"
 #include "password_storage.h"
+#include "beep_control.h"
+#include "rgb_led.h"
 
 LOG_MODULE_REGISTER(parp01, LOG_LEVEL_INF);
 
@@ -171,6 +173,21 @@ int main(void)
 	ret = shell_login_init();
 	if (ret < 0) {
 		LOG_WRN("Shell login init failed: %d", ret);
+	}
+
+	/* Initialize beep control */
+	ret = beep_control_init();
+	if (ret < 0) {
+		LOG_WRN("Beep control init failed: %d (beeper won't work)", ret);
+	}
+
+	/* Initialize RGB LED */
+	ret = rgb_led_init();
+	if (ret < 0) {
+		LOG_WRN("RGB LED init failed: %d", ret);
+	} else {
+		/* Set initial pattern: Ready (green) */
+		rgb_led_set_pattern(1);
 	}
 
 	/* Blink LED while waiting for USB host connection */

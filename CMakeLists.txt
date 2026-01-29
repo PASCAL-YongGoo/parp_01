@@ -18,4 +18,6 @@ target_sources(app PRIVATE
 	src/switch_control.c
 	src/shell_login.c
 	src/password_storage.c
+	src/beep_control.c
+	src/rgb_led.c
 )

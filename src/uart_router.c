@@ -12,6 +12,7 @@
 
 #include "uart_router.h"
 #include "usb_hid.h"
+#include "beep_control.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <string.h>
@@ -492,6 +493,9 @@ static void process_e310_frame(uart_router_t *router,
 			if (ret == 0) {
 				router->stats.epc_sent++;
 				LOG_INF("EPC: %s (RSSI: %u)", epc_str, tag.rssi);
+
+				/* Trigger beeper on successful EPC read */
+				beep_control_trigger();
 			} else {
 				LOG_ERR("Failed to send EPC via HID: %d", ret);
 				router->stats.tx_errors++;

@@ -52,6 +52,27 @@
 			label = "SW1";
 			zephyr,code = <INPUT_KEY_1>;
 		};
+
+		e310_beep: e310_beep {
+			gpios = <&gpiog 0 GPIO_ACTIVE_HIGH>;
+			label = "TY928_BEEP";
+			zephyr,code = <INPUT_KEY_2>;
+		};
+	};
+
+	/* DI/DO pins for beeper and RGB LED */
+	dio {
+		compatible = "gpio-leds";
+
+		beep_out: beep_out {
+			gpios = <&gpiof 8 GPIO_ACTIVE_HIGH>;
+			label = "BEEP_FROM_MCU";
+		};
+
+		rgb_led_sig: rgb_led_sig {
+			gpios = <&gpiog 2 GPIO_ACTIVE_HIGH>;
+			label = "RGB_LED_SIG";
+		};
 	};
 
 	aliases {
@@ -61,6 +82,9 @@
 		sw0 = &sw0;
 		sw1 = &sw1;
 		eeprom-0 = &eeprom0;
+		beep-out = &beep_out;
+		rgb-led = &rgb_led_sig;
+		e310-beep = &e310_beep;
 	};
 };
 
