@@ -9,8 +9,8 @@
 	compatible = "st,nucleo-h723zg-parp01";
 
 	chosen {
-		zephyr,console = &cdc_acm_uart0;
-		zephyr,shell-uart = &cdc_acm_uart0;
+		zephyr,console = &usart1;  /* Temporarily changed to USART1 for USB debugging */
+		zephyr,shell-uart = &usart1;  /* Shell also via USART1 */
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,dtcm = &dtcm;
