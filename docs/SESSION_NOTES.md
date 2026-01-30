@@ -1885,3 +1885,273 @@ west flash
 | **DI/DO 코드 품질 개선** | ✅ **신규** |
 
 **전체 완성도**: 양산 준비 완료 + 코드 품질 강화 🎉
+
+---
+
+## Session 9: E310 통신 디버깅 및 바이패스 최적화 (2026-01-30)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99 (v4.3.0-1307-ge3ef835ffec7)
+- **Build Status**: ✅ SUCCESS
+
+---
+
+### Accomplishments
+
+#### 1. UART 바이패스 모드를 통한 E310 통신 분석
+
+**목적**: Windows 설정 소프트웨어의 E310 통신 패턴 분석
+
+**구현**:
+- USART1 (PB14/PB15) ↔ UART4 (PD0/PD1) 투명 바이패스
+- CDC ACM은 Shell 전용, USART1은 외부 USB-Serial 어댑터 연결
+- 바이패스 모드에서 양방향 데이터 hex dump 출력
+
+**Windows 소프트웨어 연결 시퀀스 분석**:
+```
+PC->E310: 04 FF 21 [CRC]  # Get Reader Info (broadcast 0xFF)
+E310->PC: 11 00 21 00 ... # 18 bytes response
+
+PC->E310: 04 00 21 [CRC]  # Get Reader Info (address 0x00)
+E310->PC: 11 00 21 00 ... # 18 bytes response
+
+PC->E310: 04 00 51 [CRC]  # Stop Fast Inventory
+E310->PC: 05 00 51 00 ... # 6 bytes response
+
+PC->E310: 05 00 7F 00 [CRC]  # Set Work Mode (0x00, NOT 0xC0!)
+E310->PC: 06 00 7F 00 00 ... # 7 bytes response
+```
+
+---
+
+#### 2. E310 프로토콜 버그 수정
+
+**Frame 길이 계산 오류**:
+- **문제**: `expected = Len + 2` (CRC 길이를 추가로 더함)
+- **원인**: Len 필드가 이미 CRC를 포함하고 있음
+- **수정**: `expected = Len + 1` (Len 바이트 자체만 추가)
+
+```c
+// 이전 (오류)
+fa->expected = byte + E310_CRC16_LENGTH;  // 0x11 + 2 = 19
+
+// 이후 (수정)
+fa->expected = byte + 1;  // 0x11 + 1 = 18 (정확)
+```
+
+**Work Mode 값 수정**:
+- **문제**: 0xC0을 보내고 있었음
+- **수정**: Windows와 동일하게 0x00으로 변경
+
+**응답 대기 로직 추가**:
+- **문제**: 명령을 일방적으로 보내고 응답을 처리하지 않음
+- **수정**: `wait_for_e310_response()` 함수 추가
+  - `uart_router_process()` 호출하며 응답 대기
+  - 타임아웃 200ms
+
+```c
+static int wait_for_e310_response(uart_router_t *router, int timeout_ms)
+{
+    int64_t start = k_uptime_get();
+    uint32_t initial_frames = router->stats.frames_parsed;
+
+    while ((k_uptime_get() - start) < timeout_ms) {
+        uart_router_process(router);
+        if (router->stats.frames_parsed > initial_frames) {
+            return 0;  // 응답 수신됨
+        }
+        k_msleep(10);
+    }
+    return -ETIMEDOUT;
+}
+```
+
+---
+
+#### 3. Tag Inventory 응답 처리 추가
+
+**문제**: Tag Inventory (0x01) 응답이 처리되지 않음
+
+**수정**: `process_e310_frame()`에 Tag Inventory 응답 핸들러 추가
+
+```c
+} else if (header.recmd == E310_CMD_TAG_INVENTORY) {
+    if (header.status == E310_STATUS_SUCCESS) {
+        uint8_t tag_count = frame[4];
+        printk("Tag Inventory: %u tag(s) found\n", tag_count);
+        /* ... 태그 데이터 출력 ... */
+    } else if (header.status == E310_STATUS_INVENTORY_TIMEOUT) {
+        printk("Tag Inventory: No tags found (timeout)\n");
+    }
+}
+```
+
+**기타 응답도 기본 출력**:
+```c
+} else {
+    printk("E310 Response: Cmd=0x%02X Status=0x%02X (%s)\n",
+           header.recmd, header.status,
+           e310_get_status_desc(header.status));
+}
+```
+
+---
+
+#### 4. 바이패스 모드 성능 최적화
+
+**목표**: 인벤토리 중 CDC ACM 오버플로우 방지
+
+**최적화 항목**:
+
+| 항목 | 이전 | 이후 |
+|------|------|------|
+| Ring buffer 크기 | 2048 B | 4096 B |
+| 전송 버퍼 크기 | 256 B | 512 B |
+| UART4 RX 처리 | 1회/호출 | 4회/호출 |
+| 메인 루프 폴링 (bypass) | 10 ms | 0.1 ms |
+| Process 호출 (bypass) | 1회/루프 | 10회/루프 |
+
+**인벤토리 자동 감지**:
+- 인벤토리 시작 명령 (0x01, 0x50) 감지 → debug 출력 중지
+- 인벤토리 중지 명령 (0x51, 0x93) 감지 → debug 출력 복원
+
+```c
+if (cmd == 0x01 || cmd == 0x50) {
+    bypass_inventory_running = true;
+    LOG_INF("Bypass: Inventory started");
+}
+
+/* 인벤토리 중에는 debug 출력 없음 - 최대 throughput */
+if (!bypass_inventory_running) {
+    printk("E310->PC[%d]: ...");
+}
+```
+
+---
+
+### 빌드 결과
+
+**Build Status**: ✅ SUCCESS
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      131680 B         1 MB     12.56%
+             RAM:       41024 B       320 KB     12.52%
+```
+
+**변화**:
+- Flash: 136KB → 132KB (-4KB, 최적화)
+- RAM: 29KB → 41KB (+12KB, 링 버퍼 확대 4096x4)
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/uart_router.h      # 링 버퍼 크기 2048→4096
+├── src/uart_router.c      # Frame 길이 수정, 응답 대기, Tag Inventory 처리
+│                          # 바이패스 최적화, 인벤토리 자동 감지
+├── src/main.c             # 바이패스 모드 고속 폴링 (0.1ms, 10회 호출)
+├── src/e310_protocol.c    # Work mode 0x00
+
+문서:
+└── docs/SESSION_NOTES.md  # 이 문서
+```
+
+---
+
+### CRC 디버그 출력 추가
+
+CRC 오류 시 상세 정보 출력:
+```c
+if (ret != E310_OK) {
+    LOG_WRN("Frame CRC error (len=%zu)", frame_len);
+    printk("RX[%zu]: ", frame_len);
+    for (size_t i = 0; i < frame_len; i++) {
+        printk("%02X ", frame[i]);
+    }
+    printk("\n");
+    uint16_t calc_crc = e310_crc16(frame, frame_len - 2);
+    uint16_t frame_crc = frame[frame_len - 2] | (frame[frame_len - 1] << 8);
+    printk("CRC calc=%04X frame=%04X\n", calc_crc, frame_crc);
+}
+```
+
+---
+
+### 테스트 방법
+
+#### 바이패스 모드 테스트
+```bash
+# 1. USB-Serial 어댑터를 USART1에 연결
+#    PB14 (TX) → 어댑터 RX
+#    PB15 (RX) → 어댑터 TX
+#    GND → GND
+
+# 2. Shell에서 바이패스 모드 활성화
+uart:~$ router mode bypass
+
+# 3. Windows 소프트웨어로 E310 제어
+#    데이터 흐름이 MCU를 통해 양방향 전달됨
+```
+
+#### MCU 직접 제어 테스트
+```bash
+uart:~$ e310 connect    # E310 초기화 시퀀스
+uart:~$ e310 start      # Tag Inventory 시작
+uart:~$ e310 stop       # Inventory 중지
+```
+
+---
+
+### 주요 발견사항
+
+1. **E310 Len 필드**: 전체 프레임 길이 - 1 (Len 바이트 자체 미포함)
+2. **Work Mode**: Windows는 0x00 사용 (0xC0 아님)
+3. **응답 대기 필수**: 명령 후 응답을 받아야 다음 명령 가능
+4. **바이패스 처리량**: 115200 baud에서 ~11.5KB/s, 4KB 버퍼로 충분
+
+---
+
+### 다음 단계
+
+1. **하드웨어 테스트**: 펌웨어 플래시 후 E310 연결 테스트
+2. **CRC 검증**: 실제 E310 응답으로 CRC 알고리즘 최종 검증
+3. **Tag Inventory 파싱**: EPC 데이터 추출 및 HID 키보드 출력
+
+---
+
+### Build Instructions
+
+```bash
+cd /home/lyg/work/zephyr_ws/zephyrproject
+source .venv/bin/activate
+
+# 빌드
+west build -b nucleo_h723zg_parp01 apps/parp_01 -p auto
+
+# 플래시
+west flash
+```
+
+---
+
+### 프로젝트 완성도
+
+| 기능 | 상태 |
+|------|------|
+| USB CDC 콘솔 | ✅ |
+| USB HID 키보드 | ✅ |
+| E310 RFID 통신 | ✅ |
+| 스위치 인벤토리 제어 | ✅ |
+| Shell 로그인 보안 | ✅ |
+| EEPROM 비밀번호 저장 | ✅ |
+| 마스터 패스워드 | ✅ |
+| 양산용 보안 강화 | ✅ |
+| DI/DO 코드 품질 개선 | ✅ |
+| **E310 통신 디버깅** | ✅ **신규** |
+| **바이패스 성능 최적화** | ✅ **신규** |
+
+**전체 완성도**: E310 통신 분석 완료, 하드웨어 테스트 대기 🔧

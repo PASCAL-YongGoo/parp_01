@@ -59,7 +59,7 @@ extern "C" {
 /** Broadcast address */
 #define E310_ADDR_BROADCAST         0xFF
 
-/** Default reader address */
+/** Default reader address (0xFF = broadcast, works with most E310 modules) */
 #define E310_ADDR_DEFAULT           0x00
 
 /* ========================================================================
@@ -187,6 +187,9 @@ extern "C" {
 
 /** Stop Immediately */
 #define E310_CMD_STOP_IMMEDIATELY           0x93
+
+/** Set Work Mode / Initialize (used in connection sequence) */
+#define E310_CMD_SET_WORK_MODE              0x7F
 
 /** @} */
 
@@ -583,6 +586,27 @@ int e310_build_start_fast_inventory(e310_context_t *ctx, uint8_t target);
 int e310_build_stop_fast_inventory(e310_context_t *ctx);
 
 /**
+ * @brief Build "Tag Inventory" command (0x01) with default parameters
+ *
+ * Uses the same parameters as Windows configuration software.
+ *
+ * @param ctx Protocol context
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_tag_inventory_default(e310_context_t *ctx);
+
+/**
+ * @brief Build "Set Work Mode" command (0x7F)
+ *
+ * Used in connection sequence to initialize the reader.
+ *
+ * @param ctx Protocol context
+ * @param mode Work mode (0x00 = default)
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_set_work_mode(e310_context_t *ctx, uint8_t mode);
+
+/**
  * @brief Build "Tag Inventory" command (0x01)
  *
  * Single inventory operation with detailed parameters.
@@ -702,6 +726,139 @@ int e310_build_get_tag_count(e310_context_t *ctx);
  * @return Frame length ready to transmit, or negative error code
  */
 int e310_build_measure_temperature(e310_context_t *ctx);
+
+/* ========================================================================
+ * Command Builders - Configuration Commands
+ * ======================================================================== */
+
+/**
+ * @brief Build "Modify Frequency" command (0x22)
+ *
+ * @param ctx Context
+ * @param region Region code (0x01=China, 0x02=US, 0x03=Europe, 0x04=Korea)
+ * @param start_freq Start frequency index
+ * @param end_freq End frequency index
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_modify_frequency(e310_context_t *ctx, uint8_t region,
+                                 uint8_t start_freq, uint8_t end_freq);
+
+/**
+ * @brief Build "Modify Reader Address" command (0x24)
+ *
+ * @param ctx Context
+ * @param new_addr New reader address (0x00-0xFE)
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_modify_reader_addr(e310_context_t *ctx, uint8_t new_addr);
+
+/**
+ * @brief Build "Modify Inventory Time" command (0x25)
+ *
+ * @param ctx Context
+ * @param time_100ms Inventory time in 100ms units
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_modify_inventory_time(e310_context_t *ctx, uint8_t time_100ms);
+
+/**
+ * @brief Build "Modify Baud Rate" command (0x28)
+ *
+ * @param ctx Context
+ * @param baud_index Baud rate index (0=9600, 1=19200, 2=38400, 3=57600, 4=115200)
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_modify_baud_rate(e310_context_t *ctx, uint8_t baud_index);
+
+/**
+ * @brief Build "LED/Buzzer Control" command (0x33)
+ *
+ * @param ctx Context
+ * @param led_state LED state (0=off, 1=on)
+ * @param buzzer_time Buzzer duration in 100ms units
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_led_buzzer_control(e310_context_t *ctx, uint8_t led_state,
+                                   uint8_t buzzer_time);
+
+/**
+ * @brief Build "Setup Antenna Mux" command (0x3F)
+ *
+ * @param ctx Context
+ * @param antenna_config Antenna configuration byte
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_setup_antenna_mux(e310_context_t *ctx, uint8_t antenna_config);
+
+/**
+ * @brief Build "Enable/Disable Buzzer" command (0x40)
+ *
+ * @param ctx Context
+ * @param enable true to enable buzzer, false to disable
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_enable_buzzer(e310_context_t *ctx, bool enable);
+
+/**
+ * @brief Build "GPIO Control" command (0x46)
+ *
+ * @param ctx Context
+ * @param gpio_state GPIO output state bits
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_gpio_control(e310_context_t *ctx, uint8_t gpio_state);
+
+/**
+ * @brief Build "Obtain GPIO State" command (0x47)
+ *
+ * @param ctx Context
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_obtain_gpio_state(e310_context_t *ctx);
+
+/**
+ * @brief Build "Kill Tag" command (0x05)
+ *
+ * @param ctx Context
+ * @param epc Target tag EPC
+ * @param epc_len EPC length in bytes
+ * @param kill_password 4-byte kill password
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_kill_tag(e310_context_t *ctx, const uint8_t *epc, uint8_t epc_len,
+                         const uint8_t *kill_password);
+
+/**
+ * @brief Build "Set Protection" command (0x06)
+ *
+ * @param ctx Context
+ * @param epc Target tag EPC
+ * @param epc_len EPC length in bytes
+ * @param select_flag Memory selection flag
+ * @param set_flag Protection setting flag
+ * @param password 4-byte access password
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_set_protection(e310_context_t *ctx, const uint8_t *epc,
+                               uint8_t epc_len, uint8_t select_flag,
+                               uint8_t set_flag, const uint8_t *password);
+
+/**
+ * @brief Build "Block Erase" command (0x07)
+ *
+ * @param ctx Context
+ * @param epc Target tag EPC
+ * @param epc_len EPC length in bytes
+ * @param mem_bank Memory bank (0=Reserved, 1=EPC, 2=TID, 3=User)
+ * @param word_ptr Start word address
+ * @param word_count Number of words to erase
+ * @param password 4-byte access password
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_block_erase(e310_context_t *ctx, const uint8_t *epc,
+                            uint8_t epc_len, uint8_t mem_bank,
+                            uint8_t word_ptr, uint8_t word_count,
+                            const uint8_t *password);
 
 /* ========================================================================
  * Response Parsers

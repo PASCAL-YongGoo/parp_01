@@ -14,13 +14,13 @@
  * ======================================================================== */
 
 /**
- * @brief Calculate CRC-16 using CRC-16-CCITT-FALSE algorithm
+ * @brief Calculate CRC-16 per E310 manual specification
  *
- * Polynomial: 0x8408 (reversed 0x1021)
+ * Polynomial: 0x8408 (reflected form of 0x1021)
  * Initial value: 0xFFFF
- * Input reflection: No
- * Output reflection: No
- * XOR output: 0x0000
+ * LSB-first processing (reflected/reversed)
+ *
+ * This matches the algorithm in the official E310 documentation.
  */
 uint16_t e310_crc16(const uint8_t *data, size_t length)
 {
@@ -144,10 +144,38 @@ int e310_build_start_fast_inventory(e310_context_t *ctx, uint8_t target)
 	return e310_finalize_frame(ctx, idx);
 }
 
+int e310_build_tag_inventory_default(e310_context_t *ctx)
+{
+	/* Tag Inventory (0x01) with default parameters matching Windows software
+	 * Windows sends: 09 00 01 04 FE 00 80 32 [CRC]
+	 * Parameters: 04 FE 00 80 32 (5 bytes)
+	 */
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_TAG_INVENTORY, 5);
+
+	/* Default parameters from Windows software */
+	ctx->tx_buffer[idx++] = 0x04;  /* Target/Ant config */
+	ctx->tx_buffer[idx++] = 0xFE;  /* Scan config */
+	ctx->tx_buffer[idx++] = 0x00;  /* Reserved/Mask */
+	ctx->tx_buffer[idx++] = 0x80;  /* Mask addr high */
+	ctx->tx_buffer[idx++] = 0x32;  /* Scan time (50 = 5 seconds) */
+
+	return e310_finalize_frame(ctx, idx);
+}
+
 int e310_build_stop_fast_inventory(e310_context_t *ctx)
 {
 	/* Frame: Len(0x04) | Adr | Cmd(0x51) | CRC-16 */
 	size_t idx = e310_build_frame_header(ctx, E310_CMD_STOP_FAST_INVENTORY, 0);
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_set_work_mode(e310_context_t *ctx, uint8_t mode)
+{
+	/* Frame: Len(0x05) | Adr | Cmd(0x7F) | Mode | CRC-16 */
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_SET_WORK_MODE, 1);
+
+	ctx->tx_buffer[idx++] = mode;
 
 	return e310_finalize_frame(ctx, idx);
 }
@@ -744,6 +772,207 @@ int e310_build_measure_temperature(e310_context_t *ctx)
 	}
 
 	size_t idx = e310_build_frame_header(ctx, 0x92, 0);
+	return e310_finalize_frame(ctx, idx);
+}
+
+/* ========================================================================
+ * Command Builders - Configuration Commands
+ * ======================================================================== */
+
+int e310_build_modify_frequency(e310_context_t *ctx, uint8_t region,
+                                 uint8_t start_freq, uint8_t end_freq)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	/* Data: Region(1) + StartFreq(1) + EndFreq(1) */
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_MODIFY_FREQUENCY, 3);
+	ctx->tx_buffer[idx++] = region;
+	ctx->tx_buffer[idx++] = start_freq;
+	ctx->tx_buffer[idx++] = end_freq;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_modify_reader_addr(e310_context_t *ctx, uint8_t new_addr)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_MODIFY_READER_ADDR, 1);
+	ctx->tx_buffer[idx++] = new_addr;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_modify_inventory_time(e310_context_t *ctx, uint8_t time_100ms)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_MODIFY_INVENTORY_TIME, 1);
+	ctx->tx_buffer[idx++] = time_100ms;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_modify_baud_rate(e310_context_t *ctx, uint8_t baud_index)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	/* Baud index: 0=9600, 1=19200, 2=38400, 3=57600, 4=115200 */
+	if (baud_index > 4) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_MODIFY_BAUD_RATE, 1);
+	ctx->tx_buffer[idx++] = baud_index;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_led_buzzer_control(e310_context_t *ctx, uint8_t led_state,
+                                   uint8_t buzzer_time)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_LED_BUZZER_CONTROL, 2);
+	ctx->tx_buffer[idx++] = led_state;
+	ctx->tx_buffer[idx++] = buzzer_time;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_setup_antenna_mux(e310_context_t *ctx, uint8_t antenna_config)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_SETUP_ANTENNA_MUX, 1);
+	ctx->tx_buffer[idx++] = antenna_config;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_enable_buzzer(e310_context_t *ctx, bool enable)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_ENABLE_DISABLE_BUZZER, 1);
+	ctx->tx_buffer[idx++] = enable ? 0x01 : 0x00;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_gpio_control(e310_context_t *ctx, uint8_t gpio_state)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_GPIO_CONTROL, 1);
+	ctx->tx_buffer[idx++] = gpio_state;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_obtain_gpio_state(e310_context_t *ctx)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_OBTAIN_GPIO_STATE, 0);
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_kill_tag(e310_context_t *ctx, const uint8_t *epc, uint8_t epc_len,
+                         const uint8_t *kill_password)
+{
+	if (!ctx || !epc || !kill_password) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	uint8_t epc_words = (epc_len + 1) / 2;
+	size_t data_len = 1 + epc_len + 4;
+
+	if (3 + data_len + 2 > E310_MAX_FRAME_SIZE) {
+		return E310_ERR_BUFFER_OVERFLOW;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_KILL_TAG, data_len);
+	ctx->tx_buffer[idx++] = epc_words;
+	memcpy(&ctx->tx_buffer[idx], epc, epc_len);
+	idx += epc_len;
+	memcpy(&ctx->tx_buffer[idx], kill_password, 4);
+	idx += 4;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_set_protection(e310_context_t *ctx, const uint8_t *epc,
+                               uint8_t epc_len, uint8_t select_flag,
+                               uint8_t set_flag, const uint8_t *password)
+{
+	if (!ctx || !epc || !password) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	uint8_t epc_words = (epc_len + 1) / 2;
+	size_t data_len = 1 + epc_len + 1 + 1 + 4;
+
+	if (3 + data_len + 2 > E310_MAX_FRAME_SIZE) {
+		return E310_ERR_BUFFER_OVERFLOW;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_SET_PROTECTION, data_len);
+	ctx->tx_buffer[idx++] = epc_words;
+	memcpy(&ctx->tx_buffer[idx], epc, epc_len);
+	idx += epc_len;
+	ctx->tx_buffer[idx++] = select_flag;
+	ctx->tx_buffer[idx++] = set_flag;
+	memcpy(&ctx->tx_buffer[idx], password, 4);
+	idx += 4;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_block_erase(e310_context_t *ctx, const uint8_t *epc,
+                            uint8_t epc_len, uint8_t mem_bank,
+                            uint8_t word_ptr, uint8_t word_count,
+                            const uint8_t *password)
+{
+	if (!ctx || !epc || !password) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	uint8_t epc_words = (epc_len + 1) / 2;
+	size_t data_len = 1 + epc_len + 1 + 1 + 1 + 4;
+
+	if (3 + data_len + 2 > E310_MAX_FRAME_SIZE) {
+		return E310_ERR_BUFFER_OVERFLOW;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_BLOCK_ERASE, data_len);
+	ctx->tx_buffer[idx++] = epc_words;
+	memcpy(&ctx->tx_buffer[idx], epc, epc_len);
+	idx += epc_len;
+	ctx->tx_buffer[idx++] = mem_bank;
+	ctx->tx_buffer[idx++] = word_ptr;
+	ctx->tx_buffer[idx++] = word_count;
+	memcpy(&ctx->tx_buffer[idx], password, 4);
+	idx += 4;
+
 	return e310_finalize_frame(ctx, idx);
 }
 

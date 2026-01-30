@@ -31,7 +31,7 @@ extern "C" {
  * ======================================================================== */
 
 /** UART ring buffer size (per UART, per direction) */
-#define UART_ROUTER_BUF_SIZE        1024
+#define UART_ROUTER_BUF_SIZE        4096
 
 /** Maximum processing time per iteration (ms) */
 #define UART_ROUTER_PROCESS_TIMEOUT 10
@@ -278,6 +278,20 @@ int uart_router_wait_host_connection(uart_router_t *router, int32_t timeout_ms);
 /* ========================================================================
  * E310 RFID Control API
  * ======================================================================== */
+
+/**
+ * @brief Connect to E310 (initialization sequence)
+ *
+ * Sends the connection/initialization sequence to E310:
+ * 1. Get Reader Info (broadcast 0xFF)
+ * 2. Get Reader Info (address 0x00)
+ * 3. Stop Fast Inventory
+ * 4. Set Work Mode (0x00)
+ *
+ * @param router Pointer to router context
+ * @return 0 on success, negative errno on error
+ */
+int uart_router_connect_e310(uart_router_t *router);
 
 /**
  * @brief Start E310 Fast Inventory
