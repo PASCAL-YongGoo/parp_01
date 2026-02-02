@@ -11,9 +11,10 @@
  */
 
 #include "uart_router.h"
-/* #include "usb_hid.h" */  /* Disabled for bypass debugging */
+#include "usb_hid.h"
 #include "beep_control.h"
 #include "switch_control.h"
+#include "e310_settings.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <string.h>
@@ -28,6 +29,9 @@ static uart_router_t *g_router_instance;
 
 /** Frame assembler timeout (ms) - reset if no byte for this duration */
 #define FRAME_ASSEMBLER_TIMEOUT_MS  100
+
+/* CDC output mute state (default: false = enabled for development/debug) */
+static bool cdc_muted = false;
 
 /* Forward declarations */
 static void frame_assembler_reset(frame_assembler_t *fa);
@@ -66,6 +70,83 @@ static void safe_uart4_rx_reset(uart_router_t *router)
 	ring_buf_reset(&router->uart4_rx_ring);
 	frame_assembler_reset(&router->e310_frame);
 	uart_irq_rx_enable(router->uart4);
+}
+
+/* ========================================================================
+ * EPC Filter Functions (Duplicate Detection)
+ * ======================================================================== */
+
+/**
+ * @brief Initialize EPC filter
+ */
+static void epc_filter_init(epc_filter_t *filter, uint32_t debounce_sec)
+{
+	memset(filter, 0, sizeof(epc_filter_t));
+	filter->debounce_ms = debounce_sec * 1000;
+}
+
+/**
+ * @brief Clear EPC filter cache
+ */
+static void epc_filter_clear(epc_filter_t *filter)
+{
+	filter->count = 0;
+	filter->next_idx = 0;
+	memset(filter->entries, 0, sizeof(filter->entries));
+}
+
+/**
+ * @brief Set EPC filter debounce time
+ */
+static void epc_filter_set_debounce(epc_filter_t *filter, uint32_t debounce_sec)
+{
+	filter->debounce_ms = debounce_sec * 1000;
+	LOG_INF("EPC debounce set to %u seconds", debounce_sec);
+}
+
+/**
+ * @brief Check if EPC should be sent (duplicate filtering)
+ *
+ * @param filter EPC filter context
+ * @param epc EPC data
+ * @param epc_len EPC length
+ * @return true if EPC should be sent (new or debounce expired)
+ *         false if EPC is duplicate within debounce time
+ */
+static bool epc_filter_check(epc_filter_t *filter, const uint8_t *epc, uint8_t epc_len)
+{
+	int64_t now = k_uptime_get();
+
+	/* Search for existing EPC in cache */
+	for (uint8_t i = 0; i < filter->count; i++) {
+		epc_cache_entry_t *entry = &filter->entries[i];
+
+		if (entry->epc_len == epc_len &&
+		    memcmp(entry->epc, epc, epc_len) == 0) {
+			/* Found matching EPC */
+			if ((now - entry->timestamp) < filter->debounce_ms) {
+				/* Within debounce time - block */
+				return false;
+			}
+			/* Debounce expired - update timestamp and allow */
+			entry->timestamp = now;
+			return true;
+		}
+	}
+
+	/* New EPC - add to cache */
+	epc_cache_entry_t *entry = &filter->entries[filter->next_idx];
+	memcpy(entry->epc, epc, epc_len);
+	entry->epc_len = epc_len;
+	entry->timestamp = now;
+
+	/* Update cache indices */
+	filter->next_idx = (filter->next_idx + 1) % EPC_CACHE_SIZE;
+	if (filter->count < EPC_CACHE_SIZE) {
+		filter->count++;
+	}
+
+	return true;
 }
 
 /* ========================================================================
@@ -318,6 +399,9 @@ int uart_router_init(uart_router_t *router)
 	/* Initialize frame assembler */
 	frame_assembler_reset(&router->e310_frame);
 
+	/* Initialize EPC filter with default debounce time */
+	epc_filter_init(&router->epc_filter, EPC_DEBOUNCE_DEFAULT_SEC);
+
 	/* Set initial mode - start in BYPASS for debugging */
 	router->mode = ROUTER_MODE_BYPASS;
 	router->inventory_active = false;
@@ -455,7 +539,7 @@ static void process_e310_frame(uart_router_t *router,
 	}
 
 	if (header.recmd == E310_RECMD_AUTO_UPLOAD) {
-		/* Parse auto-upload tag (Fast Inventory mode) */
+		/* Parse auto-upload tag (Tag Inventory mode) */
 		e310_tag_data_t tag;
 		ret = e310_parse_auto_upload_tag(&frame[4], len - 6, &tag);
 
@@ -470,17 +554,25 @@ static void process_e310_frame(uart_router_t *router,
 				return;
 			}
 
-			/* Count EPC - minimize output to prevent CDC ACM overflow */
-			router->stats.epc_sent++;
-
-			/* Only log every 10th EPC to reduce output */
-			if ((router->stats.epc_sent % 10) == 1) {
-				LOG_INF("EPC #%u: %s (RSSI: %u)",
-				        router->stats.epc_sent, epc_str, tag.rssi);
+			/* EPC duplicate filtering */
+			if (epc_filter_check(&router->epc_filter, tag.epc, tag.epc_len)) {
+				/* New EPC or debounce expired -> send via HID */
+				int hid_ret = usb_hid_send_epc((const uint8_t *)epc_str,
+				                               strlen(epc_str));
+				if (hid_ret >= 0) {
+					router->stats.epc_sent++;
+					LOG_INF("EPC #%u: %s (RSSI: %u)",
+					        router->stats.epc_sent, epc_str, tag.rssi);
+					/* Trigger beeper on successful EPC send */
+					beep_control_trigger();
+				} else if (hid_ret != 0) {
+					/* hid_ret == 0 means muted, don't log as warning */
+					LOG_WRN("HID send failed: %d", hid_ret);
+				}
+			} else {
+				/* Duplicate EPC within debounce time -> ignore */
+				LOG_DBG("Duplicate EPC ignored: %s", epc_str);
 			}
-
-			/* Trigger beeper on successful EPC read */
-			beep_control_trigger();
 
 			router->stats.frames_parsed++;
 		} else {
@@ -732,6 +824,11 @@ int uart_router_send_uart1(uart_router_t *router, const uint8_t *data, size_t le
 		return -ENODEV;
 	}
 
+	/* Mute check - silently discard if muted */
+	if (cdc_muted) {
+		return 0;
+	}
+
 	/* Check if host is connected before sending */
 	if (!router->host_connected) {
 		/* Silently discard data when host is not connected */
@@ -894,14 +991,12 @@ int uart_router_connect_e310(uart_router_t *router)
 		wait_for_e310_response(router, 200);
 	}
 
-	/* Step 3: Stop Fast Inventory (clear any running state) */
-	len = e310_build_stop_fast_inventory(&router->e310_ctx);
+	len = e310_build_stop_immediately(&router->e310_ctx);
 	if (len > 0) {
 		uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
 		wait_for_e310_response(router, 200);
 	}
 
-	/* Step 4: Set Work Mode (0x00 = same as Windows software) */
 	len = e310_build_set_work_mode(&router->e310_ctx, 0x00);
 	if (len > 0) {
 		uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
@@ -912,6 +1007,7 @@ int uart_router_connect_e310(uart_router_t *router)
 	router->e310_ctx.reader_addr = saved_addr;
 	uart_router_set_mode(router, saved_mode);
 
+	router->e310_connected = true;
 	LOG_INF("E310 connection sequence completed");
 	return 0;
 }
@@ -923,10 +1019,21 @@ int uart_router_start_inventory(uart_router_t *router)
 		return -ENODEV;
 	}
 
-	/* Phase 3.2: Clear UART4 RX buffer before starting */
+	if (!router->e310_connected) {
+		LOG_INF("E310 not connected, running init sequence...");
+		int ret = uart_router_connect_e310(router);
+		if (ret < 0) {
+			LOG_ERR("E310 connection failed: %d", ret);
+			return ret;
+		}
+		router->e310_connected = true;
+	}
+
 	safe_uart4_rx_reset(router);
 
-	/* Build Tag Inventory command (0x01) - same as Windows software */
+	/* Clear EPC cache for new inventory session */
+	epc_filter_clear(&router->epc_filter);
+
 	int len = e310_build_tag_inventory_default(&router->e310_ctx);
 	if (len < 0) {
 		LOG_ERR("Failed to build start inventory command: %d", len);
@@ -945,7 +1052,7 @@ int uart_router_start_inventory(uart_router_t *router)
 	router->inventory_active = true;
 	switch_control_set_inventory_state(true);
 
-	LOG_INF("E310 Fast Inventory started");
+	LOG_INF("E310 Tag Inventory started");
 	return 0;
 }
 
@@ -956,27 +1063,24 @@ int uart_router_stop_inventory(uart_router_t *router)
 		return -ENODEV;
 	}
 
-	/* Build Stop Fast Inventory command */
-	int len = e310_build_stop_fast_inventory(&router->e310_ctx);
+	int len = e310_build_stop_immediately(&router->e310_ctx);
 	if (len < 0) {
-		LOG_ERR("Failed to build stop inventory command: %d", len);
+		LOG_ERR("Failed to build stop command: %d", len);
 		return len;
 	}
 
-	/* Send command to E310 via UART4 */
 	int ret = uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
 	if (ret < 0) {
-		LOG_ERR("Failed to send stop inventory command: %d", ret);
+		LOG_ERR("Failed to send stop command: %d", ret);
 		return ret;
 	}
 
 	router->inventory_active = false;
 	switch_control_set_inventory_state(false);
 
-	/* Set mode to IDLE */
 	uart_router_set_mode(router, ROUTER_MODE_IDLE);
 
-	LOG_INF("E310 Fast Inventory stopped");
+	LOG_INF("E310 Tag Inventory stopped");
 	return 0;
 }
 
@@ -1038,6 +1142,21 @@ int uart_router_get_reader_info(uart_router_t *router)
 bool uart_router_is_inventory_active(uart_router_t *router)
 {
 	return router->inventory_active;
+}
+
+/* ========================================================================
+ * CDC Output Control (Software Mute)
+ * ======================================================================== */
+
+void uart_router_set_cdc_enabled(bool enable)
+{
+	cdc_muted = !enable;
+	LOG_INF("CDC output %s", enable ? "enabled" : "disabled (muted)");
+}
+
+bool uart_router_is_cdc_enabled(void)
+{
+	return !cdc_muted;
 }
 
 /* ========================================================================
@@ -1190,7 +1309,7 @@ static int cmd_e310_start(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "E310 Fast Inventory started");
+	shell_print(sh, "E310 Tag Inventory started");
 	return 0;
 }
 
@@ -1210,7 +1329,7 @@ static int cmd_e310_stop(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "E310 Fast Inventory stopped");
+	shell_print(sh, "E310 Tag Inventory stopped");
 	return 0;
 }
 
@@ -1222,8 +1341,8 @@ static int cmd_e310_power(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	if (argc < 2) {
+		shell_print(sh, "Current RF power: %d dBm (saved)", e310_settings_get_rf_power());
 		shell_print(sh, "Usage: e310 power <0-30>");
-		shell_print(sh, "  Sets RF power in dBm");
 		return 0;
 	}
 
@@ -1239,7 +1358,12 @@ static int cmd_e310_power(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "RF power set to %d dBm", power);
+	ret = e310_settings_set_rf_power((uint8_t)power);
+	if (ret < 0) {
+		shell_warn(sh, "RF power set but failed to save: %d", ret);
+	}
+
+	shell_print(sh, "RF power set to %d dBm (saved)", power);
 	return 0;
 }
 
@@ -1341,7 +1465,7 @@ static int cmd_e310_send(const struct shell *sh, size_t argc, char **argv)
 	if (argc < 2) {
 		shell_print(sh, "Usage: e310 send <hex bytes>");
 		shell_print(sh, "Example: e310 send 04 FF 21 (Get Reader Info)");
-		shell_print(sh, "         e310 send 05 FF 50 00 (Start Fast Inventory)");
+		shell_print(sh, "         e310 send 09 00 01 04 FE 00 80 32 (Tag Inventory)");
 		shell_print(sh, "Note: CRC is automatically appended");
 		return 0;
 	}
@@ -1418,8 +1542,9 @@ static int cmd_e310_addr(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	if (argc < 2) {
-		shell_print(sh, "Current address: 0x%02X",
-		            g_router_instance->e310_ctx.reader_addr);
+		shell_print(sh, "Current address: 0x%02X (saved: 0x%02X)",
+		            g_router_instance->e310_ctx.reader_addr,
+		            e310_settings_get_reader_addr());
 		shell_print(sh, "Usage: e310 addr <0x00-0xFF>");
 		shell_print(sh, "  0xFF = broadcast (works with most modules)");
 		return 0;
@@ -1432,8 +1557,13 @@ static int cmd_e310_addr(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	g_router_instance->e310_ctx.reader_addr = (uint8_t)addr;
-	shell_print(sh, "Reader address set to 0x%02X", (uint8_t)addr);
 
+	int ret = e310_settings_set_reader_addr((uint8_t)addr);
+	if (ret < 0) {
+		shell_warn(sh, "Address set but failed to save: %d", ret);
+	}
+
+	shell_print(sh, "Reader address set to 0x%02X (saved)", (uint8_t)addr);
 	return 0;
 }
 
@@ -1724,8 +1854,8 @@ static int cmd_e310_antenna(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	if (argc < 2) {
+		shell_print(sh, "Current antenna: 0x%02x (saved)", e310_settings_get_antenna());
 		shell_print(sh, "Usage: e310 antenna <config>");
-		shell_print(sh, "  config: Antenna configuration byte (hex or decimal)");
 		return 0;
 	}
 
@@ -1744,7 +1874,12 @@ static int cmd_e310_antenna(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Antenna config set to 0x%02X", (uint8_t)config);
+	ret = e310_settings_set_antenna((uint8_t)config);
+	if (ret < 0) {
+		shell_warn(sh, "Antenna set but failed to save: %d", ret);
+	}
+
+	shell_print(sh, "Antenna config set to 0x%02X (saved)", (uint8_t)config);
 	return 0;
 }
 
@@ -1756,6 +1891,9 @@ static int cmd_e310_freq(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	if (argc < 4) {
+		uint8_t region, start, end;
+		e310_settings_get_frequency(&region, &start, &end);
+		shell_print(sh, "Current: region=%d, range=%d-%d (saved)", region, start, end);
 		shell_print(sh, "Usage: e310 freq <region> <start> <end>");
 		shell_print(sh, "  region: 1=China, 2=US, 3=Europe, 4=Korea");
 		shell_print(sh, "  start/end: Frequency index (0-62)");
@@ -1780,7 +1918,12 @@ static int cmd_e310_freq(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Frequency set: region=%u, range=%u-%u", region, start, end);
+	ret = e310_settings_set_frequency(region, start, end);
+	if (ret < 0) {
+		shell_warn(sh, "Frequency set but failed to save: %d", ret);
+	}
+
+	shell_print(sh, "Frequency set: region=%u, range=%u-%u (saved)", region, start, end);
 	return 0;
 }
 
@@ -1792,6 +1935,9 @@ static int cmd_e310_invtime(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	if (argc < 2) {
+		uint8_t inv_time = e310_settings_get_inventory_time();
+		shell_print(sh, "Current inventory time: %d (%.1f sec, saved)",
+			    inv_time, (double)(inv_time * 0.1f));
 		shell_print(sh, "Usage: e310 invtime <time>");
 		shell_print(sh, "  time: Inventory time in 100ms units (1-255)");
 		return 0;
@@ -1811,7 +1957,12 @@ static int cmd_e310_invtime(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Inventory time set to %ums", time * 100);
+	ret = e310_settings_set_inventory_time(time);
+	if (ret < 0) {
+		shell_warn(sh, "Inventory time set but failed to save: %d", ret);
+	}
+
+	shell_print(sh, "Inventory time set to %ums (saved)", time * 100);
 	return 0;
 }
 
@@ -1824,11 +1975,12 @@ static int cmd_e310_gpio(const struct shell *sh, size_t argc, char **argv)
 
 	int len;
 	if (argc < 2) {
-		/* Get GPIO state */
 		len = e310_build_obtain_gpio_state(&g_router_instance->e310_ctx);
-		shell_print(sh, "GPIO state requested (enable debug to see response)");
+		shell_print(sh, "Usage: e310 gpio [state]");
+		shell_print(sh, "  (no arg) - Get current GPIO state");
+		shell_print(sh, "  state    - Set GPIO state (0x00-0xFF)");
+		shell_print(sh, "Requesting current GPIO state...");
 	} else {
-		/* Set GPIO state */
 		unsigned long state = strtoul(argv[1], NULL, 0);
 		len = e310_build_gpio_control(&g_router_instance->e310_ctx, (uint8_t)state);
 		shell_print(sh, "GPIO state set to 0x%02X", (uint8_t)state);
@@ -1849,6 +2001,37 @@ static int cmd_e310_gpio(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_e310_settings_show(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	e310_settings_print(sh);
+	return 0;
+}
+
+static int cmd_e310_settings_reset(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = e310_settings_reset();
+	if (ret < 0) {
+		shell_error(sh, "Failed to reset settings: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "Settings reset to defaults");
+	e310_settings_print(sh);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_e310_settings,
+	SHELL_CMD(show, NULL, "Show current settings", cmd_e310_settings_show),
+	SHELL_CMD(reset, NULL, "Reset to factory defaults", cmd_e310_settings_reset),
+	SHELL_SUBCMD_SET_END
+);
+
 /* E310 buffer sub-commands */
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_e310_buffer,
 	SHELL_CMD(count, NULL, "Get tag count in buffer", cmd_e310_buffer_count),
@@ -1859,8 +2042,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_e310_buffer,
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_e310,
 	SHELL_CMD(connect, NULL, "Connect to E310 (init sequence)", cmd_e310_connect),
-	SHELL_CMD(start, NULL, "Start Fast Inventory", cmd_e310_start),
-	SHELL_CMD(stop, NULL, "Stop Fast Inventory", cmd_e310_stop),
+	SHELL_CMD(start, NULL, "Start Tag Inventory", cmd_e310_start),
+	SHELL_CMD(stop, NULL, "Stop Tag Inventory", cmd_e310_stop),
 	SHELL_CMD(single, NULL, "Single tag inventory", cmd_e310_single),
 	SHELL_CMD(power, NULL, "Set RF power (0-30 dBm)", cmd_e310_power),
 	SHELL_CMD(freq, NULL, "Set frequency region/range", cmd_e310_freq),
@@ -1875,6 +2058,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_e310,
 	SHELL_CMD(status, NULL, "Show E310 status", cmd_e310_status),
 	SHELL_CMD(addr, NULL, "Get/set reader address", cmd_e310_addr),
 	SHELL_CMD(buffer, &sub_e310_buffer, "Buffer operations", NULL),
+	SHELL_CMD(settings, &sub_e310_settings, "Persistent settings", NULL),
 	SHELL_CMD(send, NULL, "Send raw hex command", cmd_e310_send),
 	SHELL_CMD(debug, NULL, "Enable/disable debug mode", cmd_e310_debug),
 	SHELL_CMD(reset, NULL, "Stop E310 and reset router", cmd_e310_reset),
@@ -1883,6 +2067,177 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_e310,
 
 SHELL_CMD_REGISTER(e310, &sub_e310, "E310 RFID module commands", NULL);
 
-/* HID Shell Commands - Disabled for bypass debugging
- * Re-enable when HID keyboard mode is needed
- */
+/* ========================================================================
+ * USB Control Shell Commands
+ * ======================================================================== */
+
+static int cmd_usb_hid(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 2) {
+		shell_print(sh, "HID output: %s", usb_hid_is_enabled() ? "ON" : "OFF (muted)");
+		shell_print(sh, "Usage: usb hid <on|off>");
+		return 0;
+	}
+
+	if (strcmp(argv[1], "on") == 0) {
+		usb_hid_set_enabled(true);
+		shell_print(sh, "HID output enabled");
+	} else if (strcmp(argv[1], "off") == 0) {
+		usb_hid_set_enabled(false);
+		shell_print(sh, "HID output disabled (muted)");
+	} else {
+		shell_error(sh, "Invalid argument: %s (use on/off)", argv[1]);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int cmd_usb_cdc(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 2) {
+		shell_print(sh, "CDC output: %s", uart_router_is_cdc_enabled() ? "ON" : "OFF (muted)");
+		shell_print(sh, "Usage: usb cdc <on|off>");
+		return 0;
+	}
+
+	if (strcmp(argv[1], "on") == 0) {
+		uart_router_set_cdc_enabled(true);
+		shell_print(sh, "CDC output enabled");
+	} else if (strcmp(argv[1], "off") == 0) {
+		uart_router_set_cdc_enabled(false);
+		shell_print(sh, "CDC output disabled (muted)");
+	} else {
+		shell_error(sh, "Invalid argument: %s (use on/off)", argv[1]);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int cmd_usb_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "=== USB Status ===");
+	shell_print(sh, "HID output: %s", usb_hid_is_enabled() ? "ON" : "OFF (muted)");
+	shell_print(sh, "CDC output: %s", uart_router_is_cdc_enabled() ? "ON" : "OFF (muted)");
+	shell_print(sh, "HID ready: %s", usb_hid_is_ready() ? "yes" : "no");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_usb,
+	SHELL_CMD(hid, NULL, "HID output on/off", cmd_usb_hid),
+	SHELL_CMD(cdc, NULL, "CDC output on/off", cmd_usb_cdc),
+	SHELL_CMD(status, NULL, "Show USB status", cmd_usb_status),
+	SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(usb, &sub_usb, "USB control commands", NULL);
+
+/* ========================================================================
+ * HID Shell Commands
+ * ======================================================================== */
+
+static int cmd_hid_speed(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 2) {
+		shell_print(sh, "Current typing speed: %u CPM", usb_hid_get_typing_speed());
+		shell_print(sh, "Usage: hid speed <100-1500>");
+		return 0;
+	}
+
+	int speed = atoi(argv[1]);
+	int ret = usb_hid_set_typing_speed((uint16_t)speed);
+	if (ret < 0) {
+		shell_error(sh, "Failed to set speed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "Typing speed set to %u CPM", usb_hid_get_typing_speed());
+	return 0;
+}
+
+static int cmd_hid_debounce(const struct shell *sh, size_t argc, char **argv)
+{
+	if (!g_router_instance) {
+		shell_error(sh, "Router not initialized");
+		return -ENODEV;
+	}
+
+	if (argc < 2) {
+		shell_print(sh, "Current debounce: %u seconds",
+		            g_router_instance->epc_filter.debounce_ms / 1000);
+		shell_print(sh, "Usage: hid debounce <seconds>");
+		return 0;
+	}
+
+	uint32_t sec = atoi(argv[1]);
+	epc_filter_set_debounce(&g_router_instance->epc_filter, sec);
+	shell_print(sh, "Debounce set to %u seconds", sec);
+	return 0;
+}
+
+static int cmd_hid_clear(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!g_router_instance) {
+		shell_error(sh, "Router not initialized");
+		return -ENODEV;
+	}
+
+	epc_filter_clear(&g_router_instance->epc_filter);
+	shell_print(sh, "EPC cache cleared");
+	return 0;
+}
+
+static int cmd_hid_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!g_router_instance) {
+		shell_error(sh, "Router not initialized");
+		return -ENODEV;
+	}
+
+	shell_print(sh, "=== HID Status ===");
+	shell_print(sh, "Output: %s", usb_hid_is_enabled() ? "ON" : "OFF (muted)");
+	shell_print(sh, "Ready: %s", usb_hid_is_ready() ? "yes" : "no");
+	shell_print(sh, "Typing speed: %u CPM", usb_hid_get_typing_speed());
+	shell_print(sh, "EPC Filter:");
+	shell_print(sh, "  Debounce: %u sec", g_router_instance->epc_filter.debounce_ms / 1000);
+	shell_print(sh, "  Cached EPCs: %u/%u", g_router_instance->epc_filter.count, EPC_CACHE_SIZE);
+	shell_print(sh, "  EPCs sent: %u", g_router_instance->stats.epc_sent);
+	return 0;
+}
+
+static int cmd_hid_test(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	const char *test_epc = "E200 1234 5678 9ABC DEF0";
+
+	shell_print(sh, "Sending test EPC: %s", test_epc);
+	int ret = usb_hid_send_epc((const uint8_t *)test_epc, strlen(test_epc));
+	if (ret < 0) {
+		shell_error(sh, "Failed to send: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "Test EPC sent (check keyboard output)");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_hid,
+	SHELL_CMD(speed, NULL, "Get/set typing speed (CPM)", cmd_hid_speed),
+	SHELL_CMD(debounce, NULL, "Get/set EPC debounce time (seconds)", cmd_hid_debounce),
+	SHELL_CMD(clear, NULL, "Clear EPC cache", cmd_hid_clear),
+	SHELL_CMD(status, NULL, "Show HID status", cmd_hid_status),
+	SHELL_CMD(test, NULL, "Send test EPC", cmd_hid_test),
+	SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(hid, &sub_hid, "HID keyboard commands", NULL);

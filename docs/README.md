@@ -10,6 +10,12 @@ This directory contains all project documentation organized by topic.
   - Tracks accomplishments, issues, and next steps
   - Essential for resuming work on different machines
 
+### AI Agent Configuration
+- **[AI_AGENT_CONFIG.md](AI_AGENT_CONFIG.md)**: AI agent model mapping for oh-my-opencode
+  - Agent -> AI model assignments (Claude, GPT-5.2, Gemini)
+  - When to use each agent/category
+  - Parallel execution examples
+
 ### Design Documents
 - **[RFID_SYSTEM_DESIGN.md](RFID_SYSTEM_DESIGN.md)**: Complete system architecture and implementation plan
   - System overview and operating modes

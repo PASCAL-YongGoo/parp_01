@@ -52,6 +52,9 @@ static const uint8_t hid_kbd_report_desc[] = HID_KEYBOARD_REPORT_DESC();
 static const struct device *hid_dev;
 static bool hid_ready = false;
 
+/* HID output mute state (default: true = muted for development) */
+static bool hid_muted = true;
+
 /* Phase 1.3: Atomic typing speed variable */
 static atomic_t typing_speed_cpm = ATOMIC_INIT(HID_TYPING_SPEED_DEFAULT);
 
@@ -237,6 +240,12 @@ int usb_hid_send_epc(const uint8_t *epc, size_t len)
 		return -EINVAL;
 	}
 
+	/* Mute check - silently discard if muted */
+	if (hid_muted) {
+		LOG_DBG("HID muted, EPC not sent");
+		return 0;
+	}
+
 	/* Device state validation */
 	if (!hid_dev) {
 		LOG_ERR("HID device not initialized");
@@ -350,4 +359,15 @@ uint16_t usb_hid_get_typing_speed(void)
 {
 	/* Phase 1.3: Get atomically */
 	return (uint16_t)atomic_get(&typing_speed_cpm);
+}
+
+void usb_hid_set_enabled(bool enable)
+{
+	hid_muted = !enable;
+	LOG_INF("HID output %s", enable ? "enabled" : "disabled (muted)");
+}
+
+bool usb_hid_is_enabled(void)
+{
+	return !hid_muted;
 }

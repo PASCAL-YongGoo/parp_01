@@ -6,7 +6,7 @@
 
 / {
 	model = "PARP-01 Custom Board based on STM32H723ZG";
-	compatible = "st,nucleo-h723zg-parp01";
+	compatible = "st,stm32h723zg-nucleo";
 
 	chosen {
 		zephyr,console = &usart1;  /* Temporarily changed to USART1 for USB debugging */
@@ -102,7 +102,7 @@
 
 &clk_lse {
 	clock-frequency = <32768>;
-	status = "okay";
+	status = "disabled";
 };
 
 &clk_lsi {
@@ -117,9 +117,9 @@
 	status = "okay";
 };
 
-/* PLL Configuration - 275MHz SYSCLK (Maximum Safe for STM32H723)
+/* PLL Configuration - 550MHz SYSCLK (Same as official Nucleo H723ZG)
  *
- * STM32H723 Maximum Frequencies (from clock_stm32_ll_h7.c):
+ * STM32H723 Maximum Frequencies:
  *   - SYSCLK max: 550 MHz
  *   - AHB max: 275 MHz
  *   - APBx max: 137.5 MHz
@@ -128,30 +128,35 @@
  *   HSE = 8MHz external crystal
  *   M=4 -> VCO input = 2MHz
  *   N=275 -> VCO output = 550MHz
- *   P=2 -> SYSCLK = 275MHz (AHB limit)
+ *   P=1 -> SYSCLK = 550MHz
  *   Q=4 -> 137.5MHz output for peripherals
  *   R=2 -> 275MHz output
  */
 &pll {
 	div-m = <4>;
 	mul-n = <275>;
-	div-p = <2>;
+	div-p = <1>;
 	div-q = <4>;
 	div-r = <2>;
 	clocks = <&clk_hse>;
 	status = "okay";
 };
 
-/* RCC Configuration for 275MHz SYSCLK */
+/* RCC Configuration for 550MHz SYSCLK (Same as official Nucleo H723ZG)
+ *
+ * SYSCLK = 550 MHz
+ * HCLK = SYSCLK / 2 = 275 MHz
+ * APBx = HCLK / 2 = 137.5 MHz
+ */
 &rcc {
 	clocks = <&pll>;
-	clock-frequency = <DT_FREQ_M(275)>;
+	clock-frequency = <DT_FREQ_M(550)>;
 	d1cpre = <1>;
-	hpre = <1>;    /* HCLK: 275 MHz (matches CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, at AHB limit) */
-	d1ppre = <2>;  /* APB1: 137.5 MHz (at APBx limit) */
-	d2ppre1 = <2>; /* APB2: 137.5 MHz (at APBx limit) */
-	d2ppre2 = <2>; /* APB3: 137.5 MHz (at APBx limit) */
-	d3ppre = <2>;  /* APB4: 137.5 MHz (at APBx limit) */
+	hpre = <2>;    /* HCLK = SYSCLK / 2 = 275 MHz */
+	d1ppre = <2>;  /* APB3 = HCLK / 2 = 137.5 MHz */
+	d2ppre1 = <2>; /* APB1 = HCLK / 2 = 137.5 MHz */
+	d2ppre2 = <2>; /* APB2 = HCLK / 2 = 137.5 MHz (USART1) */
+	d3ppre = <2>;  /* APB4 = HCLK / 2 = 137.5 MHz */
 };
 
 /* Power supply configuration */
@@ -159,12 +164,11 @@
 	power-supply = "ldo";
 };
 
-/* UART1 - Console (PB14-TX, PB15-RX) with TX/RX swapped */
+/* UART1 - Console (PB14-TX, PB15-RX) */
 &usart1 {
 	pinctrl-0 = <&usart1_tx_pb14 &usart1_rx_pb15>;
 	pinctrl-names = "default";
 	current-speed = <115200>;
-	tx-rx-swap;
 	status = "okay";
 };
 

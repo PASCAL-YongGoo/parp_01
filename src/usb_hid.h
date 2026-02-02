@@ -80,4 +80,21 @@ int usb_hid_set_typing_speed(uint16_t cpm);
  */
 uint16_t usb_hid_get_typing_speed(void);
 
+/**
+ * @brief Enable or disable HID output (software mute)
+ *
+ * When disabled, usb_hid_send_epc() will silently discard data
+ * without sending to USB. USB connection remains active.
+ *
+ * @param enable true to enable output, false to mute
+ */
+void usb_hid_set_enabled(bool enable);
+
+/**
+ * @brief Check if HID output is enabled
+ *
+ * @return true if HID output is enabled, false if muted
+ */
+bool usb_hid_is_enabled(void);
+
 #endif /* USB_HID_H */

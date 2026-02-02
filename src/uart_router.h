@@ -36,6 +36,35 @@ extern "C" {
 /** Maximum processing time per iteration (ms) */
 #define UART_ROUTER_PROCESS_TIMEOUT 10
 
+/** Maximum number of cached EPCs for duplicate filtering */
+#define EPC_CACHE_SIZE              32
+
+/** Default EPC debounce time in seconds */
+#define EPC_DEBOUNCE_DEFAULT_SEC    3
+
+/* ========================================================================
+ * EPC Filter (for duplicate detection)
+ * ======================================================================== */
+
+/**
+ * @brief EPC cache entry for duplicate detection
+ */
+typedef struct {
+	uint8_t epc[E310_MAX_EPC_LENGTH]; /**< EPC data */
+	uint8_t epc_len;                   /**< EPC length */
+	int64_t timestamp;                 /**< Last sent timestamp (ms) */
+} epc_cache_entry_t;
+
+/**
+ * @brief EPC filter context for duplicate detection
+ */
+typedef struct {
+	epc_cache_entry_t entries[EPC_CACHE_SIZE]; /**< Cache entries */
+	uint8_t count;                              /**< Current cached count */
+	uint8_t next_idx;                           /**< Next insertion index (circular) */
+	uint32_t debounce_ms;                       /**< Debounce time in ms */
+} epc_filter_t;
+
 /* ========================================================================
  * Frame Assembler (for E310 protocol frames)
  * ======================================================================== */
@@ -123,6 +152,9 @@ typedef struct {
 	e310_context_t e310_ctx;     /**< E310 protocol handler */
 	frame_assembler_t e310_frame; /**< E310 frame assembler */
 
+	/* EPC duplicate filter */
+	epc_filter_t epc_filter;     /**< EPC duplicate detection */
+
 	/* Statistics */
 	uart_router_stats_t stats;   /**< Router statistics */
 
@@ -132,6 +164,7 @@ typedef struct {
 	bool uart4_ready;            /**< UART4 device is ready */
 	bool host_connected;         /**< USB host has opened port (DTR high) */
 	bool inventory_active;       /**< E310 inventory is running */
+	bool e310_connected;         /**< E310 connection sequence completed */
 
 } uart_router_t;
 
@@ -285,7 +318,7 @@ int uart_router_wait_host_connection(uart_router_t *router, int32_t timeout_ms);
  * Sends the connection/initialization sequence to E310:
  * 1. Get Reader Info (broadcast 0xFF)
  * 2. Get Reader Info (address 0x00)
- * 3. Stop Fast Inventory
+ * 3. Stop Inventory
  * 4. Set Work Mode (0x00)
  *
  * @param router Pointer to router context
@@ -294,9 +327,9 @@ int uart_router_wait_host_connection(uart_router_t *router, int32_t timeout_ms);
 int uart_router_connect_e310(uart_router_t *router);
 
 /**
- * @brief Start E310 Fast Inventory
+ * @brief Start E310 Tag Inventory
  *
- * Sends Start Fast Inventory command to E310 and sets mode to INVENTORY.
+ * Sends Tag Inventory command to E310 and sets mode to INVENTORY.
  *
  * @param router Pointer to router context
  * @return 0 on success, negative errno on error
@@ -304,9 +337,9 @@ int uart_router_connect_e310(uart_router_t *router);
 int uart_router_start_inventory(uart_router_t *router);
 
 /**
- * @brief Stop E310 Fast Inventory
+ * @brief Stop E310 Tag Inventory
  *
- * Sends Stop Fast Inventory command to E310 and sets mode to IDLE.
+ * Sends Stop Inventory command to E310 and sets mode to IDLE.
  *
  * @param router Pointer to router context
  * @return 0 on success, negative errno on error
@@ -339,6 +372,27 @@ int uart_router_get_reader_info(uart_router_t *router);
  * @return true if inventory is running, false otherwise
  */
 bool uart_router_is_inventory_active(uart_router_t *router);
+
+/* ========================================================================
+ * CDC Output Control (Software Mute)
+ * ======================================================================== */
+
+/**
+ * @brief Enable or disable CDC output (software mute)
+ *
+ * When disabled, CDC data transmission is silently discarded.
+ * USB connection remains active.
+ *
+ * @param enable true to enable output, false to mute
+ */
+void uart_router_set_cdc_enabled(bool enable);
+
+/**
+ * @brief Check if CDC output is enabled
+ *
+ * @return true if CDC output is enabled, false if muted
+ */
+bool uart_router_is_cdc_enabled(void);
 
 /** @} */ /* End of uart_router group */
 

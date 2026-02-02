@@ -22,6 +22,7 @@
 #include "password_storage.h"
 #include "beep_control.h"
 #include "rgb_led.h"
+#include "e310_settings.h"
 
 LOG_MODULE_REGISTER(parp01, LOG_LEVEL_INF);
 
@@ -75,17 +76,40 @@ static void usb_msg_cb(struct usbd_context *const ctx,
  * @brief Inventory toggle callback from switch
  *
  * Called when SW0 is pressed to toggle inventory on/off.
+ * Automatically switches USB output mode:
+ * - Inventory ON:  HID=ON, CDC=OFF (RFID pad mode)
+ * - Inventory OFF: HID=OFF, CDC=ON (Debug mode)
  */
 static void on_inventory_toggle(bool start)
 {
 	if (start) {
-		/* Starting inventory - force logout for security */
+		/* ===== Inventory Mode: RFID pad operation ===== */
+		LOG_INF("Switching to Inventory Mode");
+
+		/* Security: force logout */
 		shell_login_force_logout();
+
+		/* USB output: HID ON, CDC OFF */
+		usb_hid_set_enabled(true);
+		uart_router_set_cdc_enabled(false);
+
+		/* Start E310 inventory */
 		uart_router_start_inventory(&uart_router);
+
+		LOG_INF("Inventory Mode: HID=ON, CDC=OFF");
 	} else {
-		/* Stopping inventory - user can now login */
+		/* ===== Debug Mode: development/debugging ===== */
+		LOG_INF("Switching to Debug Mode");
+
+		/* Stop E310 inventory */
 		uart_router_stop_inventory(&uart_router);
-		LOG_INF("Inventory stopped. Login with 'login <password>'");
+
+		/* USB output: HID OFF, CDC ON */
+		usb_hid_set_enabled(false);
+		uart_router_set_cdc_enabled(true);
+
+		LOG_INF("Debug Mode: HID=OFF, CDC=ON");
+		LOG_INF("Login with 'login <password>'");
 	}
 }
 
@@ -132,7 +156,7 @@ int main(void)
 	gpio_pin_set_dt(&test_led, 0);
 	printk("LED blinked once\n");
 
-	/* USB HID disabled for UART4 bypass debugging
+	/* Initialize USB HID keyboard */
 	printk("Init USB HID...\n");
 	ret = parp_usb_hid_init();
 	if (ret < 0) {
@@ -141,8 +165,6 @@ int main(void)
 	} else {
 		printk("USB HID OK\n");
 	}
-	*/
-	printk("USB HID disabled (bypass mode)\n");
 
 	/* Initialize USB device stack */
 	printk("Init USB device stack...\n");
@@ -191,17 +213,30 @@ int main(void)
 		switch_control_set_inventory_callback(on_inventory_toggle);
 	}
 
+	/* Set default mode: Debug Mode (development) */
+	/* HID=OFF, CDC=ON - Shell usable on boot */
+	usb_hid_set_enabled(false);
+	uart_router_set_cdc_enabled(true);
+	LOG_INF("Default mode: Debug (HID=OFF, CDC=ON)");
+	LOG_INF("Press SW0 to switch to Inventory Mode");
+
 	/* Initialize password storage (must be before shell_login_init) */
 	ret = password_storage_init();
 	if (ret < 0) {
 		LOG_WRN("Password storage init failed: %d", ret);
 	}
 
-	/* Initialize shell login */
+	ret = e310_settings_init();
+	if (ret < 0) {
+		LOG_WRN("E310 settings init failed: %d (using defaults)", ret);
+	}
+
+	/* Initialize shell login - DISABLED for testing
 	ret = shell_login_init();
 	if (ret < 0) {
 		LOG_WRN("Shell login init failed: %d", ret);
 	}
+	*/
 
 	/* Initialize beep control */
 	ret = beep_control_init();

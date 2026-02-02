@@ -12,6 +12,7 @@ target_sources(app PRIVATE
 	src/main.c
 	src/e310_protocol.c
 	src/e310_test.c
+	src/e310_settings.c
 	src/uart_router.c
 	src/usb_hid.c
 	src/usb_device.c

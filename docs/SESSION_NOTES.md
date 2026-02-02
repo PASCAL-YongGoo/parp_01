@@ -801,8 +801,8 @@ typedef struct {
 **새로 추가된 함수**:
 | 함수 | 기능 |
 |------|------|
-| `uart_router_start_inventory()` | Fast Inventory 시작 + 모드 전환 |
-| `uart_router_stop_inventory()` | Fast Inventory 중지 |
+| `uart_router_start_inventory()` | Tag Inventory 시작 + 모드 전환 |
+| `uart_router_stop_inventory()` | Tag Inventory 중지 |
 | `uart_router_set_rf_power()` | RF 출력 설정 (0-30 dBm) |
 | `uart_router_get_reader_info()` | 리더 정보 요청 |
 | `uart_router_is_inventory_active()` | 인벤토리 상태 확인 |
@@ -858,8 +858,8 @@ router mode     - 모드 설정
 
 **E310 명령어** (신규):
 ```
-e310 start      - Fast Inventory 시작
-e310 stop       - Fast Inventory 중지
+e310 start      - Tag Inventory 시작
+e310 stop       - Tag Inventory 중지
 e310 power <N>  - RF 출력 설정 (0-30 dBm)
 e310 info       - 리더 정보 요청
 e310 status     - E310 상태 표시
@@ -913,7 +913,7 @@ src/main.c            # E310 인벤토리 자동 시작
 | 타이핑 속도 설정 | ✅ | 100-1500 CPM |
 | E310 통신 (UART4) | ✅ | 명령 송신/응답 수신 |
 | 프레임 어셈블러 | ✅ | CRC 검증 포함 |
-| Fast Inventory | ✅ | 자동 태그 읽기 |
+| Tag Inventory | ✅ | 자동 태그 읽기 |
 | RF 출력 설정 | ✅ | 0-30 dBm |
 | Shell 제어 | ✅ | e310, hid 명령어 |
 
@@ -923,7 +923,7 @@ src/main.c            # E310 인벤토리 자동 시작
 
 #### 1. 부팅 후 자동 동작
 - USB CDC 연결 대기 (5초)
-- E310 Fast Inventory 자동 시작
+- E310 Tag Inventory 자동 시작
 - 태그 읽으면 HID 키보드로 EPC 출력
 
 #### 2. Shell 명령어로 제어
@@ -1361,7 +1361,7 @@ Memory region         Used Size  Region Size  %age Used
 │                        부팅                                      │
 │  - LED 깜빡임                                                    │
 │  - USB 호스트 연결 대기 (5초)                                    │
-│  - E310 Fast Inventory 자동 시작                                 │
+│  - E310 Tag Inventory 자동 시작                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -1916,7 +1916,7 @@ E310->PC: 11 00 21 00 ... # 18 bytes response
 PC->E310: 04 00 21 [CRC]  # Get Reader Info (address 0x00)
 E310->PC: 11 00 21 00 ... # 18 bytes response
 
-PC->E310: 04 00 51 [CRC]  # Stop Fast Inventory
+PC->E310: 04 00 51 [CRC]  # Stop Inventory
 E310->PC: 05 00 51 00 ... # 6 bytes response
 
 PC->E310: 05 00 7F 00 [CRC]  # Set Work Mode (0x00, NOT 0xC0!)
