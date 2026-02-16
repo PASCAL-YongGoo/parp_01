@@ -122,8 +122,10 @@ int e310_parse_response_header(const uint8_t *frame, size_t length,
 	header->recmd = frame[2];
 	header->status = frame[3];
 
-	/* Verify length field matches actual length */
-	if (header->len != length) {
+	/* Verify length field matches actual length.
+	 * E310 Len field = bytes after Len byte (Adr+Cmd+Data+CRC).
+	 * Total frame length = Len + 1 (the Len byte itself). */
+	if (header->len + 1 != length) {
 		return -3; /* Length mismatch */
 	}
 
@@ -146,18 +148,23 @@ int e310_build_start_fast_inventory(e310_context_t *ctx, uint8_t target)
 
 int e310_build_tag_inventory_default(e310_context_t *ctx)
 {
-	/* Tag Inventory (0x01) with default parameters matching Windows software
+	/* Tag Inventory (0x01) with default parameters captured from Windows software.
 	 * Windows sends: 09 00 01 04 FE 00 80 32 [CRC]
-	 * Parameters: 04 FE 00 80 32 (5 bytes)
+	 *
+	 * NOTE: This is a 5-byte shortened format observed in practice.
+	 * Full protocol defines: QValue(1) + Session(1) + MaskMem(1) + MaskAdr(2) +
+	 *   MaskLen(1) + [MaskData] + [AdrTID] + [LenTID] + [Target] + [Ant] + [ScanTime]
+	 *
+	 * Interpreted as: QValue=0x04(Q=4), Session=0xFE(Smart),
+	 *   MaskMem=0x00(none), MaskAdr=0x0080, ScanTime=0x32(50*100ms=5s)
 	 */
 	size_t idx = e310_build_frame_header(ctx, E310_CMD_TAG_INVENTORY, 5);
 
-	/* Default parameters from Windows software */
-	ctx->tx_buffer[idx++] = 0x04;  /* Target/Ant config */
-	ctx->tx_buffer[idx++] = 0xFE;  /* Scan config */
-	ctx->tx_buffer[idx++] = 0x00;  /* Reserved/Mask */
-	ctx->tx_buffer[idx++] = 0x80;  /* Mask addr high */
-	ctx->tx_buffer[idx++] = 0x32;  /* Scan time (50 = 5 seconds) */
+	ctx->tx_buffer[idx++] = 0x04;  /* QValue: Q=4, no flags */
+	ctx->tx_buffer[idx++] = 0xFE;  /* Session: Smart (0xFE) */
+	ctx->tx_buffer[idx++] = 0x00;  /* MaskMem: no mask */
+	ctx->tx_buffer[idx++] = 0x80;  /* MaskAdr high byte */
+	ctx->tx_buffer[idx++] = 0x32;  /* ScanTime: 50 = 5 seconds */
 
 	return e310_finalize_frame(ctx, idx);
 }
@@ -435,7 +442,7 @@ int e310_parse_reader_info(const uint8_t *data, size_t length,
 {
 	/* Reader info format: Version(2) | Type | Tr_Type | dmaxfre | dminfre |
 	 *                      Power | Scntm | Ant | Reserved(2) | CheckAnt */
-	if (length < 13) {
+	if (length < 12) {
 		return -1;
 	}
 
@@ -685,9 +692,9 @@ int e310_build_select(e310_context_t *ctx, const e310_select_params_t *params)
 		return E310_ERR_INVALID_PARAM;
 	}
 
-	/* Data: SelParam(1) + Truncate(1) + Target(1) + Action(1) + MemBank(1) + Pointer(2) + Length(1) + Mask */
+	/* Data: Ant(1) + SelTarget(1) + SelAction(1) + MaskMem(1) + MaskAdr(2) + MaskLen(1) + MaskData + Truncate(1) */
 	uint8_t mask_bytes = (params->mask_len + 7) / 8;
-	size_t data_len = 1 + 1 + 1 + 1 + 1 + 2 + 1 + mask_bytes;
+	size_t data_len = 1 + 1 + 1 + 1 + 2 + 1 + mask_bytes + 1;
 
 	if (3 + data_len + 2 > E310_MAX_FRAME_SIZE) {
 		return E310_ERR_BUFFER_OVERFLOW;
@@ -695,8 +702,7 @@ int e310_build_select(e310_context_t *ctx, const e310_select_params_t *params)
 
 	size_t idx = e310_build_frame_header(ctx, 0x9A, data_len);
 
-	ctx->tx_buffer[idx++] = params->sel_param;
-	ctx->tx_buffer[idx++] = params->truncate;
+	ctx->tx_buffer[idx++] = params->antenna;
 	ctx->tx_buffer[idx++] = params->target;
 	ctx->tx_buffer[idx++] = params->action;
 	ctx->tx_buffer[idx++] = params->mem_bank;
@@ -707,6 +713,7 @@ int e310_build_select(e310_context_t *ctx, const e310_select_params_t *params)
 		memcpy(&ctx->tx_buffer[idx], params->mask, mask_bytes);
 		idx += mask_bytes;
 	}
+	ctx->tx_buffer[idx++] = params->truncate;
 
 	return e310_finalize_frame(ctx, idx);
 }
@@ -779,18 +786,26 @@ int e310_build_measure_temperature(e310_context_t *ctx)
  * Command Builders - Configuration Commands
  * ======================================================================== */
 
-int e310_build_modify_frequency(e310_context_t *ctx, uint8_t region,
-                                 uint8_t start_freq, uint8_t end_freq)
+int e310_build_modify_frequency(e310_context_t *ctx, uint8_t max_fre, uint8_t min_fre)
 {
 	if (!ctx) {
 		return E310_ERR_INVALID_PARAM;
 	}
 
-	/* Data: Region(1) + StartFreq(1) + EndFreq(1) */
-	size_t idx = e310_build_frame_header(ctx, E310_CMD_MODIFY_FREQUENCY, 3);
-	ctx->tx_buffer[idx++] = region;
-	ctx->tx_buffer[idx++] = start_freq;
-	ctx->tx_buffer[idx++] = end_freq;
+	/* Frame: Len(0x06) | Adr | Cmd(0x22) | MaxFre | MinFre | CRC-16
+	 * MaxFre: bit7-6 = freq band (upper), bit5-0 = max frequency point
+	 * MinFre: bit7-6 = freq band (lower), bit5-0 = min frequency point
+	 *
+	 * Band encoding (MaxFre[7:6], MinFre[7:6]):
+	 *   00,01 = Chinese band 2
+	 *   00,10 = US band
+	 *   00,11 = Korean band
+	 *   01,00 = EU band
+	 *   10,00 = Chinese band 1
+	 */
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_MODIFY_FREQUENCY, 2);
+	ctx->tx_buffer[idx++] = max_fre;
+	ctx->tx_buffer[idx++] = min_fre;
 
 	return e310_finalize_frame(ctx, idx);
 }
@@ -825,8 +840,8 @@ int e310_build_modify_baud_rate(e310_context_t *ctx, uint8_t baud_index)
 		return E310_ERR_INVALID_PARAM;
 	}
 
-	/* Baud index: 0=9600, 1=19200, 2=38400, 3=57600, 4=115200 */
-	if (baud_index > 4) {
+	/* Valid indices: 0=9600, 1=19200, 2=38400, 5=57600, 6=115200 */
+	if (baud_index > 6 || baud_index == 3 || baud_index == 4) {
 		return E310_ERR_INVALID_PARAM;
 	}
 
@@ -836,16 +851,22 @@ int e310_build_modify_baud_rate(e310_context_t *ctx, uint8_t baud_index)
 	return e310_finalize_frame(ctx, idx);
 }
 
-int e310_build_led_buzzer_control(e310_context_t *ctx, uint8_t led_state,
-                                   uint8_t buzzer_time)
+int e310_build_led_buzzer_control(e310_context_t *ctx, uint8_t active_time,
+                                    uint8_t silent_time, uint8_t times)
 {
 	if (!ctx) {
 		return E310_ERR_INVALID_PARAM;
 	}
 
-	size_t idx = e310_build_frame_header(ctx, E310_CMD_LED_BUZZER_CONTROL, 2);
-	ctx->tx_buffer[idx++] = led_state;
-	ctx->tx_buffer[idx++] = buzzer_time;
+	/* Frame: Len(0x07) | Adr | Cmd(0x33) | ActiveT | SilentT | Times | CRC-16
+	 * ActiveT: ON time in 50ms units (0-255 = 0ms-12750ms)
+	 * SilentT: OFF time in 50ms units (0-255 = 0ms-12750ms)
+	 * Times:   Number of ON/OFF cycles (0-255)
+	 */
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_LED_BUZZER_CONTROL, 3);
+	ctx->tx_buffer[idx++] = active_time;
+	ctx->tx_buffer[idx++] = silent_time;
+	ctx->tx_buffer[idx++] = times;
 
 	return e310_finalize_frame(ctx, idx);
 }
@@ -1015,8 +1036,8 @@ int e310_parse_tag_count(const uint8_t *data, size_t length, uint32_t *count)
 		return E310_ERR_FRAME_TOO_SHORT;
 	}
 
-	/* Tag count is 2 bytes, little-endian */
-	*count = data[0] | ((uint32_t)data[1] << 8);
+	/* Tag count is 2 bytes, big-endian (MSB first per protocol doc) */
+	*count = ((uint32_t)data[0] << 8) | data[1];
 
 	return E310_OK;
 }
@@ -1027,12 +1048,22 @@ int e310_parse_temperature(const uint8_t *data, size_t length, int8_t *temperatu
 		return E310_ERR_INVALID_PARAM;
 	}
 
-	if (length < 1) {
+	/* Temperature response: PlusMinus(1) + Temp(1)
+	 * PlusMinus: 0 = below 0 C (negative), 1 = above 0 C (positive)
+	 * Temp: absolute temperature value in C
+	 */
+	if (length < 2) {
 		return E310_ERR_FRAME_TOO_SHORT;
 	}
 
-	/* Temperature is signed 8-bit value */
-	*temperature = (int8_t)data[0];
+	uint8_t plus_minus = data[0];
+	uint8_t temp_value = data[1];
+
+	if (plus_minus == 0) {
+		*temperature = -(int8_t)temp_value;
+	} else {
+		*temperature = (int8_t)temp_value;
+	}
 
 	return E310_OK;
 }

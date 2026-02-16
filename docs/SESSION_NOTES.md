@@ -2459,3 +2459,216 @@ prj.conf                                                    # OBSCURED 주석 �
 | **Console/Shell ISR 충돌 해결** | OK **신규** |
 
 **전체 완성도**: Shell 입력 문제 해결, CDC ACM 콘솔 복원 완료
+
+---
+
+## Session 12: CDC TX/RX 하드웨어 검증 완료 (2026-02-16)
+
+### Hardware Verification
+
+#### USB CDC ACM TX/RX 정상 동작 확인 ✅
+
+- **CDC TX** (MCU → PC): 정상
+- **CDC RX** (PC → MCU): 정상
+- Session 11에서 Console/Shell을 CDC ACM으로 전환한 결과 하드웨어에서 정상 동작 확인
+
+**검증 완료 항목**:
+- [x] CDC ACM 콘솔 출력 (TX)
+- [x] CDC ACM Shell 입력 (RX)
+- [x] ISR 충돌 없음 (USART1/CDC ACM 분리 성공)
+
+### 프로젝트 완성도
+
+| 기능 | 상태 |
+|------|------|
+| **USB CDC TX/RX** | ✅ **하드웨어 검증 완료** |
+| USB HID 키보드 | 하드웨어 테스트 대기 |
+| E310 RFID 통신 | 하드웨어 테스트 대기 |
+| 스위치 인벤토리 제어 | 하드웨어 테스트 대기 |
+| USART1 Bypass | 하드웨어 테스트 대기 |
+
+---
+
+## Session 13: E310 프로토콜 수정 + 안테나 진단 + HW 검증 (2026-02-16)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99
+- **Build Status**: ✅ SUCCESS (FLASH 13.60%, RAM 12.25%)
+
+---
+
+### Accomplishments
+
+#### 1. USART1↔UART4 바이패스 기능 제거
+
+**이유**: CDC에서 명령어로 직접 제어하므로 바이패스 불필요.
+
+**수정 내용**:
+- `uart_router.h`: `ROUTER_MODE_BYPASS`, UART1 ring buffers, bypass 콜백 전부 제거
+- `uart_router.c`: bypass 관련 코드 전면 삭제
+- `main.c`: CDC mute 호출 제거, 메인 루프 10ms 균일 폴링
+
+---
+
+#### 2. E310 응답 파싱 버그 수정
+
+**Frame 길이 검증**:
+- `e310_protocol.c`: `len != length` → `len + 1 != length` 수정
+- Reader Info parser: `length < 13` → `length < 12` 수정
+
+---
+
+#### 3. TX/RX Hex 항상 출력
+
+- `uart_router_send_uart4()`, `process_e310_frame()`: debug mode 체크 제거
+- 모든 E310 통신의 hex 값이 항상 콘솔에 출력됨
+
+---
+
+#### 4. Shell 명령 Send+Wait 패턴 적용 (18개 명령)
+
+모든 E310 셸 명령에 `wait_for_e310_response()` 추가하여 fire-and-forget → send+wait로 변경.
+
+---
+
+#### 5. 로그 버퍼 크기 증가
+
+- `prj.conf`: `CONFIG_LOG_BUFFER_SIZE=4096`, `CONFIG_LOG_PROCESS_THREAD_STACK_SIZE=2048`
+- "messages dropped" 문제 완화
+
+---
+
+#### 6. Reference Python 코드 리뷰
+
+- CRC 알고리즘 불일치 발견: Python=0x1021 MSB-first (틀림), C=0x8408 LSB-first (맞음)
+- Python `_send_command()`에서 프레임 불완전 수신 버그 발견
+
+---
+
+#### 7. 프로토콜 문서 vs C 코드 전수 대조 (8건 수정)
+
+Reference 프로토콜 문서와 C 코드를 전수 대조하여 발견된 불일치 8건 수정 완료:
+
+| # | 명령 | 수정 내용 | 상태 |
+|---|------|----------|:---:|
+| C1 | 0x22 Frequency | 3바이트→2바이트, 밴드 비트 인코딩 | ✅ |
+| C2 | 0x33 LED/Buzzer | 2바이트→3바이트 (ActiveT, SilentT, Times) | ✅ |
+| C3 | 0x28 Baud Rate | 인덱스 0~4 → 0,1,2,5,6 | ✅ |
+| C4 | 0x9A Select | 필드 순서+Ant 추가+Truncate 위치 | ✅ |
+| W1 | 0x92 Temperature | PlusMinus+Temp 2바이트 파싱 | ✅ |
+| W2 | 0x74 Tag Count | 리틀엔디안→빅엔디안 | ✅ |
+| W3 | 0x21 Reader Info | 밴드 디코딩 표시 | ✅ HW검증 |
+| W4 | 0x01 Inventory default | 코멘트 정정 | ✅ |
+
+추가: 0x66, 0x6E, 0x91 명령 코드 상수, E310_BAUD_* 상수, E310_DEFAULT_FREQ_END=5
+
+---
+
+#### 8. HW 테스트 결과
+
+**E310 연결**: 3/3 OK ✅
+```
+TX[5]: 04 FF 21 19 95
+RX[18]: 11 00 21 00 02 0B 3D C0 0A 3C 01 01 00 01 CD FF
+Reader Info: FW 11.2, Model 0x3D, Protocol Gen2
+Freq: Korea, channels 0-5 (6 ch) ✅
+RF Power: 10 dBm, Antenna: 0x01, CheckAnt: ENABLED
+```
+
+**안테나 진단** (`e310 send` 이용):
+```
+Return Loss 임계값 (0x6E): 3 dB
+측정 Return Loss (0x91, 920.625MHz Ant1): 2 dB
+→ 2 dB < 3 dB → 안테나 체크 실패 → 태그 읽기 불가
+```
+
+**RGB LED**: `rgb test` 정상 동작 ✅
+**부저**: `beep test` 정상 동작 ✅
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/e310_protocol.c     # 프로토콜 수정 8건 (freq, led/buzzer, baud, select, temp, tag count, reader info)
+├── src/e310_protocol.h     # 상수 추가 (0x66, 0x6E, 0x91, BAUD_*, 구조체 수정, 선언 변경)
+├── src/uart_router.c       # bypass 제거, send+wait, hex 항상 출력, 호출부 수정
+├── src/uart_router.h       # bypass 제거 (ROUTER_MODE_BYPASS, UART1 ring buffers)
+├── src/e310_settings.h     # FREQ_END=5
+├── src/e310_test.c         # Select 구조체 필드명 변경
+├── src/main.c              # bypass 제거, 메인 루프 단순화
+├── prj.conf                # 로그 버퍼 설정
+└── docs/SESSION_NOTES.md   # 이 문서
+```
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      142704 B         1 MB     13.60%
+             RAM:       40176 B       320 KB     12.25%
+```
+
+---
+
+### 남은 작업
+
+#### CRITICAL: 안테나 Return Loss 문제
+- **증상**: 측정 RL 2dB < 임계값 3dB → 태그 읽기 불가
+- **원인 추정**: 안테나 커넥터 접촉 불량 또는 안테나 불량 (2dB는 매우 낮음)
+- **대응 방안**:
+  1. 임계값 낮추기: `e310 send 05 00 6E 81` (3dB→1dB) — 임시 우회
+  2. 안테나/커넥터 물리적 점검 및 교체 — 근본 해결
+  3. 다른 주파수에서 추가 측정 — 주파수 특성 확인
+
+#### 선택적 개선
+- `e310 led on/off` 명령 파라미터 개선 (현재 0x33 파라미터 부정확)
+- LED0 (PE2), LED1 (PE3) 활용 로직
+- SW1 (PD11) 핸들러 추가
+- 인벤토리 성공 시 RGB LED + 부저 자동 피드백 연동
+- `e310 single` 0xF8 에러 재현 확인
+
+#### 프로덕션 준비
+- Shell 로그인 재활성화 (`#if 0` → `#if 1`)
+- 인벤토리 모드에서 HID 키보드 출력 + EPC 필터링 동작 검증
+- EEPROM 설정 저장/로드 동작 검증
+
+---
+
+### 프로젝트 완성도
+
+| 기능 | 상태 |
+|------|------|
+| USB CDC 콘솔 | ✅ HW 검증 완료 |
+| USB HID 키보드 | ✅ 구현 완료, HW 테스트 대기 |
+| E310 RFID 통신 | ✅ connect 3/3 OK |
+| 프로토콜 문서 대조 | ✅ 8건 수정 완료 |
+| 한국 주파수 (6ch) | ✅ HW 검증 완료 |
+| 스위치 인벤토리 제어 | ✅ 구현 완료 |
+| Shell 로그인 보안 | ✅ 구현 완료 (개발 모드 비활성화) |
+| EEPROM 설정 저장 | ✅ 구현 완료 |
+| RGB LED (7x SK6812) | ✅ HW 검증 완료 |
+| 부저 (PF8) | ✅ HW 검증 완료 |
+| E310 부저 입력 (PG0) | ✅ 구현 완료 |
+| **안테나 Return Loss** | ❌ **2dB < 3dB 임계값 → 태그 읽기 불가** |
+
+**전체 완성도**: 소프트웨어 거의 완성, 안테나 물리적 문제 해결 필요
+
+---
+
+### Build Instructions
+
+```bash
+cd /home/lyg/work/zephyr_ws/zephyrproject
+source .venv/bin/activate
+
+# 빌드
+west build -b nucleo_h723zg_parp01 apps/parp_01 -p auto
+
+# 플래시
+west flash
+```

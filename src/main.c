@@ -83,33 +83,16 @@ static void usb_msg_cb(struct usbd_context *const ctx,
 static void on_inventory_toggle(bool start)
 {
 	if (start) {
-		/* ===== Inventory Mode: RFID pad operation ===== */
 		LOG_INF("Switching to Inventory Mode");
-
-		/* Security: force logout */
 		shell_login_force_logout();
-
-		/* USB output: HID ON, CDC OFF */
 		usb_hid_set_enabled(true);
-		uart_router_set_cdc_enabled(false);
-
-		/* Start E310 inventory */
 		uart_router_start_inventory(&uart_router);
-
-		LOG_INF("Inventory Mode: HID=ON, CDC=OFF");
+		LOG_INF("Inventory Mode: HID=ON");
 	} else {
-		/* ===== Debug Mode: development/debugging ===== */
 		LOG_INF("Switching to Debug Mode");
-
-		/* Stop E310 inventory */
 		uart_router_stop_inventory(&uart_router);
-
-		/* USB output: HID OFF, CDC ON */
 		usb_hid_set_enabled(false);
-		uart_router_set_cdc_enabled(true);
-
-		LOG_INF("Debug Mode: HID=OFF, CDC=ON");
-		LOG_INF("Login with 'login <password>'");
+		LOG_INF("Debug Mode: HID=OFF");
 	}
 }
 
@@ -213,11 +196,8 @@ int main(void)
 		switch_control_set_inventory_callback(on_inventory_toggle);
 	}
 
-	/* Set default mode: Debug Mode (development) */
-	/* HID=OFF, CDC=ON - Shell usable on boot */
 	usb_hid_set_enabled(false);
-	uart_router_set_cdc_enabled(true);
-	LOG_INF("Default mode: Debug (HID=OFF, CDC=ON)");
+	LOG_INF("Default mode: Debug (HID=OFF)");
 	LOG_INF("Press SW0 to switch to Inventory Mode");
 
 	/* Initialize password storage (must be before shell_login_init) */
@@ -287,20 +267,9 @@ int main(void)
 	LOG_INF("Press SW0 to toggle inventory On/Off");
 	LOG_INF("Shell commands: e310 connect, e310 start, e310 stop");
 
-	/* Main loop: blink LED and process router */
 	while (1) {
-		/* Process UART router - call multiple times for bypass throughput */
-		router_mode_t mode = uart_router_get_mode(&uart_router);
-		if (mode == ROUTER_MODE_BYPASS) {
-			/* High-speed polling for bypass mode */
-			for (int i = 0; i < 10; i++) {
-				uart_router_process(&uart_router);
-			}
-			k_usleep(100);  /* 0.1ms - very fast polling */
-		} else {
-			uart_router_process(&uart_router);
-			k_msleep(10);   /* Normal 10ms polling */
-		}
+		uart_router_process(&uart_router);
+		k_msleep(10);
 
 		/* Check shell login timeout (less frequently) */
 		static int64_t last_login_check = 0;

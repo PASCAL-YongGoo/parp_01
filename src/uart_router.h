@@ -100,9 +100,6 @@ typedef enum {
 	/** Idle - no routing active */
 	ROUTER_MODE_IDLE = 0,
 
-	/** Bypass mode - transparent CDC ACM ↔ UART4 bridging */
-	ROUTER_MODE_BYPASS,
-
 	/** Inventory mode - UART4 → E310 Parser → USB HID Keyboard */
 	ROUTER_MODE_INVENTORY,
 } router_mode_t;
@@ -131,20 +128,15 @@ typedef struct {
  */
 typedef struct {
 	/* UART devices */
-	const struct device *uart1;  /**< CDC ACM or USART1 device (PC) */
 	const struct device *uart4;  /**< UART4 device (E310 module) */
 
 	/* Operating mode */
 	router_mode_t mode;          /**< Current operating mode */
 	struct k_mutex mode_lock;    /**< Mode change protection */
 
-	/* Ring buffers for data routing (RX and TX) */
-	struct ring_buf uart1_rx_ring;  /**< UART1 RX ring buffer */
-	struct ring_buf uart1_tx_ring;  /**< UART1 TX ring buffer */
+	/* Ring buffers for UART4 data */
 	struct ring_buf uart4_rx_ring;  /**< UART4 RX ring buffer */
 	struct ring_buf uart4_tx_ring;  /**< UART4 TX ring buffer */
-	uint8_t uart1_rx_buf[UART_ROUTER_BUF_SIZE];  /**< UART1 RX buffer storage */
-	uint8_t uart1_tx_buf[UART_ROUTER_BUF_SIZE];  /**< UART1 TX buffer storage */
 	uint8_t uart4_rx_buf[UART_ROUTER_BUF_SIZE];  /**< UART4 RX buffer storage */
 	uint8_t uart4_tx_buf[UART_ROUTER_BUF_SIZE];  /**< UART4 TX buffer storage */
 
@@ -160,9 +152,7 @@ typedef struct {
 
 	/* State flags */
 	bool running;                /**< Router is running */
-	bool uart1_ready;            /**< UART1 device is ready */
 	bool uart4_ready;            /**< UART4 device is ready */
-	bool host_connected;         /**< USB host has opened port (DTR high) */
 	bool inventory_active;       /**< E310 inventory is running */
 	bool e310_connected;         /**< E310 connection sequence completed */
 
@@ -247,18 +237,6 @@ void uart_router_get_stats(uart_router_t *router, uart_router_stats_t *stats);
 void uart_router_reset_stats(uart_router_t *router);
 
 /**
- * @brief Send data to UART1 (PC)
- *
- * Queues data for transmission to UART1.
- *
- * @param router Pointer to router context
- * @param data Data buffer
- * @param len Data length
- * @return Number of bytes queued, or negative errno on error
- */
-int uart_router_send_uart1(uart_router_t *router, const uint8_t *data, size_t len);
-
-/**
  * @brief Send data to UART4 (E310)
  *
  * Queues data for transmission to UART4.
@@ -277,36 +255,6 @@ int uart_router_send_uart4(uart_router_t *router, const uint8_t *data, size_t le
  * @return Human-readable mode name
  */
 const char *uart_router_get_mode_name(router_mode_t mode);
-
-/**
- * @brief Check and update USB host connection status
- *
- * Checks the DTR (Data Terminal Ready) line control signal to determine
- * if the USB host has opened the CDC ACM port.
- *
- * @param router Pointer to router context
- * @return true if host is connected (DTR high), false otherwise
- */
-bool uart_router_check_host_connection(uart_router_t *router);
-
-/**
- * @brief Check if USB host is connected
- *
- * @param router Pointer to router context
- * @return true if host is connected, false otherwise
- */
-bool uart_router_is_host_connected(uart_router_t *router);
-
-/**
- * @brief Wait for USB host connection with timeout
- *
- * Blocks until the USB host connects or timeout expires.
- *
- * @param router Pointer to router context
- * @param timeout_ms Timeout in milliseconds (0 = no wait, -1 = forever)
- * @return 0 if connected, -ETIMEDOUT if timeout
- */
-int uart_router_wait_host_connection(uart_router_t *router, int32_t timeout_ms);
 
 /* ========================================================================
  * E310 RFID Control API
@@ -372,27 +320,6 @@ int uart_router_get_reader_info(uart_router_t *router);
  * @return true if inventory is running, false otherwise
  */
 bool uart_router_is_inventory_active(uart_router_t *router);
-
-/* ========================================================================
- * CDC Output Control (Software Mute)
- * ======================================================================== */
-
-/**
- * @brief Enable or disable CDC output (software mute)
- *
- * When disabled, CDC data transmission is silently discarded.
- * USB connection remains active.
- *
- * @param enable true to enable output, false to mute
- */
-void uart_router_set_cdc_enabled(bool enable);
-
-/**
- * @brief Check if CDC output is enabled
- *
- * @return true if CDC output is enabled, false if muted
- */
-bool uart_router_is_cdc_enabled(void);
 
 /** @} */ /* End of uart_router group */
 

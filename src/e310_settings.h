@@ -38,7 +38,7 @@ extern "C" {
 #define E310_DEFAULT_ANTENNA         0x00    /* Default antenna config */
 #define E310_DEFAULT_FREQ_REGION     4       /* Korea */
 #define E310_DEFAULT_FREQ_START      0       /* First frequency index */
-#define E310_DEFAULT_FREQ_END        19      /* Last frequency index */
+#define E310_DEFAULT_FREQ_END        5       /* Last frequency index (Korean band: 0-5 = 6 channels) */
 #define E310_DEFAULT_INVENTORY_TIME  50      /* 5 seconds (50 x 100ms) */
 #define E310_DEFAULT_READER_ADDR     0xFF    /* Broadcast address */
 #define E310_DEFAULT_TYPING_SPEED    600     /* 600 CPM */

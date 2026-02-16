@@ -304,14 +304,14 @@ static void test_build_select(void)
 	e310_init(&ctx, E310_ADDR_DEFAULT);
 
 	e310_select_params_t params = {
-		.sel_param = 0x00,
-		.truncate = 0x00,
+		.antenna = 0x00,
 		.target = E310_TARGET_A,
 		.action = 0x00,
 		.mem_bank = E310_MEMBANK_EPC,
 		.pointer = 0x20,   /* Start at EPC data (skip PC+CRC) */
 		.mask_len = 96,    /* 12 bytes = 96 bits */
 		.mask = {0xE2, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22},
+		.truncate = 0x00,
 	};
 
 	int len = e310_build_select(&ctx, &params);

@@ -31,9 +31,6 @@ static uart_router_t *g_router_instance;
 /** Frame assembler timeout (ms) - reset if no byte for this duration */
 #define FRAME_ASSEMBLER_TIMEOUT_MS  100
 
-/* CDC output mute state (default: false = enabled for development/debug) */
-static bool cdc_muted = false;
-
 /* Re-entrance guard for uart_router_process() */
 static atomic_t process_lock = ATOMIC_INIT(0);
 
@@ -56,7 +53,6 @@ static void safe_ring_buf_reset_all(uart_router_t *router)
 	uart_irq_rx_disable(router->uart4);
 	uart_irq_tx_disable(router->uart4);
 
-	/* Reset UART4 buffers only (bypass disabled) */
 	ring_buf_reset(&router->uart4_rx_ring);
 	ring_buf_reset(&router->uart4_tx_ring);
 
@@ -313,48 +309,6 @@ static void uart4_callback(const struct device *dev, void *user_data)
 	}
 }
 
-/**
- * @brief CDC ACM (bypass) interrupt callback
- */
-static void usart1_bypass_callback(const struct device *dev, void *user_data)
-{
-	uart_router_t *router = (uart_router_t *)user_data;
-
-	if (!uart_irq_update(dev)) {
-		return;
-	}
-
-	/* Handle RX - data from PC to forward to E310 */
-	if (uart_irq_rx_ready(dev)) {
-		uint8_t buf[64];
-		int len = uart_fifo_read(dev, buf, sizeof(buf));
-
-		if (len > 0) {
-			int put = ring_buf_put(&router->uart1_rx_ring, buf, len);
-			router->stats.uart1_rx_bytes += put;
-
-			if (put < len) {
-				router->stats.rx_overruns++;
-				LOG_WRN("CDC ACM RX overrun: lost %d bytes", len - put);
-			}
-		}
-	}
-
-	/* Handle TX - data from E310 to forward to PC */
-	if (uart_irq_tx_ready(dev)) {
-		uint8_t *data;
-		uint32_t len = ring_buf_get_claim(&router->uart1_tx_ring, &data, 64);
-
-		if (len > 0) {
-			int sent = uart_fifo_fill(dev, data, len);
-			ring_buf_get_finish(&router->uart1_tx_ring, sent);
-			router->stats.uart1_tx_bytes += sent;
-		} else {
-			uart_irq_tx_disable(dev);
-		}
-	}
-}
-
 /* ========================================================================
  * Initialization
  * ======================================================================== */
@@ -367,29 +321,12 @@ int uart_router_init(uart_router_t *router)
 	/* Initialize mutex */
 	k_mutex_init(&router->mode_lock);
 
-	/* Get USART1 device for bypass (PB14-TX, PB15-RX) */
-	router->uart1 = DEVICE_DT_GET(DT_NODELABEL(usart1));
-	if (!device_is_ready(router->uart1)) {
-		LOG_WRN("USART1 bypass device not ready (bypass disabled)");
-		router->uart1 = NULL;
-		router->uart1_ready = false;
-	} else {
-		router->uart1_ready = true;
-		LOG_INF("USART1 bypass device ready: %s", router->uart1->name);
-	}
-
 	/* Get UART4 device (E310 RFID module) */
 	router->uart4 = DEVICE_DT_GET(DT_NODELABEL(uart4));
 	if (!device_is_ready(router->uart4)) {
 		LOG_ERR("UART4 device not ready");
 		return -ENODEV;
 	}
-
-	/* Initialize ring buffers for UART1 (USART1 bypass) */
-	ring_buf_init(&router->uart1_rx_ring, sizeof(router->uart1_rx_buf),
-	              router->uart1_rx_buf);
-	ring_buf_init(&router->uart1_tx_ring, sizeof(router->uart1_tx_buf),
-	              router->uart1_tx_buf);
 
 	/* Initialize ring buffers for UART4 */
 	ring_buf_init(&router->uart4_rx_ring, sizeof(router->uart4_rx_buf),
@@ -406,20 +343,14 @@ int uart_router_init(uart_router_t *router)
 	/* Initialize EPC filter with default debounce time */
 	epc_filter_init(&router->epc_filter, EPC_DEBOUNCE_DEFAULT_SEC);
 
-	/* Set initial mode - start in BYPASS for debugging */
-	router->mode = ROUTER_MODE_BYPASS;
+	router->mode = ROUTER_MODE_IDLE;
 	router->inventory_active = false;
 	router->uart4_ready = true;
-	router->host_connected = true;
 
-	/* Store global reference for shell commands */
 	g_router_instance = router;
 
-	LOG_INF("UART Router initialized (BYPASS mode: USART1 <-> UART4)");
+	LOG_INF("UART Router initialized (IDLE mode)");
 	LOG_INF("  UART4 (E310): %s (PD0-RX, PD1-TX)", router->uart4->name);
-	if (router->uart1_ready) {
-		LOG_INF("  USART1 (bypass): %s (PB14-TX, PB15-RX)", router->uart1->name);
-	}
 
 	return 0;
 }
@@ -438,13 +369,6 @@ int uart_router_start(uart_router_t *router)
 	uart_irq_callback_user_data_set(router->uart4, uart4_callback, router);
 	uart_irq_rx_enable(router->uart4);
 
-	/* Configure CDC ACM interrupt for bypass */
-	if (router->uart1_ready && router->uart1) {
-		uart_irq_callback_user_data_set(router->uart1, usart1_bypass_callback, router);
-		uart_irq_rx_enable(router->uart1);
-		LOG_INF("CDC ACM bypass enabled");
-	}
-
 	router->running = true;
 
 	LOG_INF("UART Router started");
@@ -457,7 +381,6 @@ int uart_router_stop(uart_router_t *router)
 		return 0;
 	}
 
-	/* Disable UART4 interrupts (bypass disabled) */
 	uart_irq_rx_disable(router->uart4);
 	uart_irq_tx_disable(router->uart4);
 
@@ -516,14 +439,11 @@ bool e310_is_debug_mode(void);
 static void process_e310_frame(uart_router_t *router,
                                 const uint8_t *frame, size_t len)
 {
-	/* Debug mode: print raw frame */
-	if (e310_is_debug_mode()) {
-		printk("RX[%zu]: ", len);
-		for (size_t i = 0; i < len; i++) {
-			printk("%02X ", frame[i]);
-		}
-		printk("\n");
+	printk("RX[%zu]: ", len);
+	for (size_t i = 0; i < len; i++) {
+		printk("%02X ", frame[i]);
 	}
+	printk("\n");
 
 	/* Parse E310 protocol frame */
 	e310_response_header_t header;
@@ -613,12 +533,97 @@ static void process_e310_frame(uart_router_t *router,
 			printk("Tag Inventory: Status 0x%02X (%s)\n",
 			       header.status, e310_get_status_desc(header.status));
 		}
-	} else {
-		/* Other response types - always show for visibility */
+	} else if (header.recmd == E310_CMD_OBTAIN_READER_INFO) {
 		router->stats.frames_parsed++;
-		printk("E310 Response: Cmd=0x%02X Status=0x%02X (%s)\n",
+		if (header.status == E310_STATUS_SUCCESS && len > 6) {
+			e310_reader_info_t info;
+			ret = e310_parse_reader_info(&frame[4], len - 6, &info);
+			if (ret == E310_OK) {
+				printk("=== Reader Info ===\n");
+				printk("  FW Version: %u.%u\n",
+				       info.firmware_version >> 8,
+				       info.firmware_version & 0xFF);
+				printk("  Model: 0x%02X\n", info.model_type);
+				printk("  Protocol: 0x%02X\n", info.protocol_type);
+				{
+					/* Decode frequency band from bit7-6 of MaxFre/MinFre */
+					uint8_t band_hi = (info.max_freq >> 6) & 0x03;
+					uint8_t band_lo = (info.min_freq >> 6) & 0x03;
+					uint8_t max_point = info.max_freq & 0x3F;
+					uint8_t min_point = info.min_freq & 0x3F;
+					const char *band_name = "Unknown";
+					if (band_hi == 0 && band_lo == 1) band_name = "China2";
+					else if (band_hi == 0 && band_lo == 2) band_name = "US";
+					else if (band_hi == 0 && band_lo == 3) band_name = "Korea";
+					else if (band_hi == 1 && band_lo == 0) band_name = "EU";
+					else if (band_hi == 2 && band_lo == 0) band_name = "China1";
+					printk("  Freq: %s, channels %u-%u (%u ch)\n",
+					       band_name, min_point, max_point,
+					       max_point - min_point + 1);
+				}
+				printk("  RF Power: %u dBm\n", info.power);
+				printk("  Scan Time: %u\n", info.scan_time);
+				printk("  Antenna: 0x%02X\n", info.antenna);
+			} else {
+				printk("Reader Info: parse error %d\n", ret);
+			}
+		} else {
+			printk("Reader Info: Status 0x%02X (%s)\n",
+			       header.status, e310_get_status_desc(header.status));
+		}
+	} else if (header.recmd == E310_CMD_OBTAIN_READER_SN) {
+		router->stats.frames_parsed++;
+		if (header.status == E310_STATUS_SUCCESS && len > 6) {
+			size_t sn_len = len - 6;
+			printk("Reader SN: ");
+			for (size_t i = 0; i < sn_len; i++) {
+				printk("%02X", frame[4 + i]);
+			}
+			printk("\n");
+		} else {
+			printk("Reader SN: Status 0x%02X (%s)\n",
+			       header.status, e310_get_status_desc(header.status));
+		}
+	} else if (header.recmd == 0x92) {
+		router->stats.frames_parsed++;
+		if (header.status == E310_STATUS_SUCCESS && len > 6) {
+			int8_t temp;
+			ret = e310_parse_temperature(&frame[4], len - 6, &temp);
+			if (ret == E310_OK) {
+				printk("Reader Temperature: %d C\n", temp);
+			} else {
+				printk("Temperature: parse error %d\n", ret);
+			}
+		} else {
+			printk("Temperature: Status 0x%02X (%s)\n",
+			       header.status, e310_get_status_desc(header.status));
+		}
+	} else if (header.recmd == E310_CMD_GET_TAG_COUNT_FROM_BUFFER) {
+		router->stats.frames_parsed++;
+		if (header.status == E310_STATUS_SUCCESS && len > 6) {
+			uint32_t count;
+			ret = e310_parse_tag_count(&frame[4], len - 6, &count);
+			if (ret == E310_OK) {
+				printk("Tag Count: %u\n", count);
+			} else {
+				printk("Tag Count: parse error %d\n", ret);
+			}
+		} else {
+			printk("Tag Count: Status 0x%02X (%s)\n",
+			       header.status, e310_get_status_desc(header.status));
+		}
+	} else {
+		router->stats.frames_parsed++;
+		printk("E310 [0x%02X] Status=0x%02X (%s)",
 		       header.recmd, header.status,
 		       e310_get_status_desc(header.status));
+		if (header.status == E310_STATUS_SUCCESS && len > 6) {
+			printk(" Data:");
+			for (size_t i = 4; i < len - 2; i++) {
+				printk(" %02X", frame[i]);
+			}
+		}
+		printk("\n");
 	}
 }
 
@@ -686,85 +691,6 @@ static void process_inventory_mode(uart_router_t *router)
 	}
 }
 
-/** Bypass inventory running flag - suppresses debug when inventory active */
-static bool bypass_inventory_running = false;
-
-/**
- * @brief Process bypass mode (USART1 ↔ UART4 transparent bridge)
- *
- * Pure data forwarding - no processing, minimal overhead.
- * Auto-detects inventory start/stop and adjusts debug output.
- */
-static void process_bypass_mode(uart_router_t *router)
-{
-	uint8_t buf[512];  /* Large buffer for high throughput */
-	int len;
-
-	if (!router->uart1_ready || !router->uart1) {
-		return;
-	}
-
-	/* USART1 RX → UART4 TX (PC commands to E310) */
-	len = ring_buf_get(&router->uart1_rx_ring, buf, sizeof(buf));
-	if (len > 0) {
-		/* Detect inventory start/stop commands (only check first frame) */
-		if (!bypass_inventory_running && len >= 3) {
-			uint8_t cmd = buf[2];
-			if (cmd == 0x01 || cmd == 0x50) {
-				bypass_inventory_running = true;
-				LOG_INF("Bypass: Inventory started");
-			}
-		} else if (bypass_inventory_running && len >= 3) {
-			uint8_t cmd = buf[2];
-			if (cmd == 0x51 || cmd == 0x93) {
-				bypass_inventory_running = false;
-				LOG_INF("Bypass: Inventory stopped");
-			}
-		}
-
-		/* Debug output only when inventory not running */
-		if (!bypass_inventory_running) {
-			printk("PC->E310[%d]: ", len);
-			for (int i = 0; i < len; i++) {
-				printk("%02X ", buf[i]);
-			}
-			printk("\n");
-		}
-
-		/* Forward to UART4 */
-		int put = ring_buf_put(&router->uart4_tx_ring, buf, len);
-		if (put > 0) {
-			uart_irq_tx_enable(router->uart4);
-			router->stats.uart4_tx_bytes += put;
-		}
-	}
-
-	/* UART4 RX → USART1 TX (E310 responses to PC) - HIGH PRIORITY */
-	/* Process multiple times to drain buffer faster */
-	for (int i = 0; i < 4; i++) {
-		len = ring_buf_get(&router->uart4_rx_ring, buf, sizeof(buf));
-		if (len <= 0) {
-			break;
-		}
-
-		/* NO debug output during inventory - maximum throughput */
-		if (!bypass_inventory_running) {
-			printk("E310->PC[%d]: ", len);
-			for (int j = 0; j < len; j++) {
-				printk("%02X ", buf[j]);
-			}
-			printk("\n");
-		}
-
-		/* Forward to USART1 */
-		int put = ring_buf_put(&router->uart1_tx_ring, buf, len);
-		if (put > 0) {
-			uart_irq_tx_enable(router->uart1);
-			router->stats.uart1_tx_bytes += put;
-		}
-	}
-}
-
 void uart_router_process(uart_router_t *router)
 {
 	if (!router->running) {
@@ -780,27 +706,7 @@ void uart_router_process(uart_router_t *router)
 		return; /* Another thread is already processing */
 	}
 
-	/* Periodically check host connection status */
-	uart_router_check_host_connection(router);
-
-	router_mode_t mode = uart_router_get_mode(router);
-
-	switch (mode) {
-	case ROUTER_MODE_INVENTORY:
-		process_inventory_mode(router);
-		break;
-
-	case ROUTER_MODE_BYPASS:
-		/* Transparent CDC ACM ↔ UART4 bridge */
-		process_bypass_mode(router);
-		break;
-
-	case ROUTER_MODE_IDLE:
-	default:
-		/* Process E310 responses even in IDLE mode (for single commands) */
-		process_inventory_mode(router);
-		break;
-	}
+	process_inventory_mode(router);
 
 	atomic_set(&process_lock, 0);
 }
@@ -827,42 +733,9 @@ const char *uart_router_get_mode_name(router_mode_t mode)
 {
 	switch (mode) {
 	case ROUTER_MODE_IDLE:       return "IDLE";
-	case ROUTER_MODE_BYPASS:     return "BYPASS";
 	case ROUTER_MODE_INVENTORY:  return "INVENTORY";
 	default:                     return "UNKNOWN";
 	}
-}
-
-int uart_router_send_uart1(uart_router_t *router, const uint8_t *data, size_t len)
-{
-	if (!router->uart1_ready) {
-		return -ENODEV;
-	}
-
-	/* Mute check - silently discard if muted */
-	if (cdc_muted) {
-		return 0;
-	}
-
-	/* Check if host is connected before sending */
-	if (!router->host_connected) {
-		/* Silently discard data when host is not connected */
-		return 0;
-	}
-
-	/* Queue data in TX ring buffer */
-	int put = ring_buf_put(&router->uart1_tx_ring, data, len);
-	if (put > 0) {
-		/* Enable TX interrupt to start transmission */
-		uart_irq_tx_enable(router->uart1);
-	}
-
-	if (put < (int)len) {
-		router->stats.tx_errors++;
-		LOG_WRN("UART1 TX buffer full: lost %zu bytes", len - put);
-	}
-
-	return put;
 }
 
 int uart_router_send_uart4(uart_router_t *router, const uint8_t *data, size_t len)
@@ -871,14 +744,11 @@ int uart_router_send_uart4(uart_router_t *router, const uint8_t *data, size_t le
 		return -ENODEV;
 	}
 
-	/* Debug: print TX data */
-	if (e310_is_debug_mode()) {
-		printk("TX[%zu]: ", len);
-		for (size_t i = 0; i < len; i++) {
-			printk("%02X ", data[i]);
-		}
-		printk("\n");
+	printk("TX[%zu]: ", len);
+	for (size_t i = 0; i < len; i++) {
+		printk("%02X ", data[i]);
 	}
+	printk("\n");
 
 	/* Queue data in TX ring buffer */
 	int put = ring_buf_put(&router->uart4_tx_ring, data, len);
@@ -893,47 +763,6 @@ int uart_router_send_uart4(uart_router_t *router, const uint8_t *data, size_t le
 	}
 
 	return put;
-}
-
-/* ========================================================================
- * USB Host Connection Detection (DTR)
- * ======================================================================== */
-
-bool uart_router_check_host_connection(uart_router_t *router)
-{
-	if (!router->uart1_ready) {
-		return false;
-	}
-
-	/* Physical UART doesn't have DTR - assume always connected */
-	router->host_connected = true;
-	return true;
-}
-
-bool uart_router_is_host_connected(uart_router_t *router)
-{
-	return router->host_connected;
-}
-
-int uart_router_wait_host_connection(uart_router_t *router, int32_t timeout_ms)
-{
-	if (timeout_ms == 0) {
-		/* No wait, just check current state */
-		uart_router_check_host_connection(router);
-		return router->host_connected ? 0 : -ETIMEDOUT;
-	}
-
-	int64_t start = k_uptime_get();
-	int64_t deadline = (timeout_ms < 0) ? INT64_MAX : start + timeout_ms;
-
-	while (k_uptime_get() < deadline) {
-		if (uart_router_check_host_connection(router)) {
-			return 0;
-		}
-		k_msleep(100);
-	}
-
-	return -ETIMEDOUT;
 }
 
 /* ========================================================================
@@ -1185,21 +1014,6 @@ bool uart_router_is_inventory_active(uart_router_t *router)
 }
 
 /* ========================================================================
- * CDC Output Control (Software Mute)
- * ======================================================================== */
-
-void uart_router_set_cdc_enabled(bool enable)
-{
-	cdc_muted = !enable;
-	LOG_INF("CDC output %s", enable ? "enabled" : "disabled (muted)");
-}
-
-bool uart_router_is_cdc_enabled(void)
-{
-	return !cdc_muted;
-}
-
-/* ========================================================================
  * Shell Commands
  * ======================================================================== */
 
@@ -1214,9 +1028,6 @@ static int cmd_router_status(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	uart_router_t *router = g_router_instance;
-
-	/* Update host connection status */
-	uart_router_check_host_connection(router);
 
 	shell_print(sh, "=== UART Router Status ===");
 	shell_print(sh, "Running: %s", router->running ? "yes" : "no");
@@ -1275,20 +1086,18 @@ static int cmd_router_mode(const struct shell *sh, size_t argc, char **argv)
 	if (argc < 2) {
 		shell_print(sh, "Current mode: %s",
 			    uart_router_get_mode_name(g_router_instance->mode));
-		shell_print(sh, "Usage: router mode <idle|bypass|inventory>");
+		shell_print(sh, "Usage: router mode <idle|inventory>");
 		return 0;
 	}
 
 	router_mode_t new_mode;
 	if (strcmp(argv[1], "idle") == 0) {
 		new_mode = ROUTER_MODE_IDLE;
-	} else if (strcmp(argv[1], "bypass") == 0) {
-		new_mode = ROUTER_MODE_BYPASS;
 	} else if (strcmp(argv[1], "inventory") == 0) {
 		new_mode = ROUTER_MODE_INVENTORY;
 	} else {
 		shell_error(sh, "Unknown mode: %s", argv[1]);
-		shell_print(sh, "Valid modes: idle, bypass, inventory");
+		shell_print(sh, "Valid modes: idle, inventory");
 		return -EINVAL;
 	}
 
@@ -1349,6 +1158,7 @@ static int cmd_e310_start(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	wait_for_e310_response(g_router_instance, 500);
 	shell_print(sh, "E310 Tag Inventory started");
 	return 0;
 }
@@ -1369,6 +1179,7 @@ static int cmd_e310_stop(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	wait_for_e310_response(g_router_instance, 500);
 	shell_print(sh, "E310 Tag Inventory stopped");
 	return 0;
 }
@@ -1398,6 +1209,7 @@ static int cmd_e310_power(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	wait_for_e310_response(g_router_instance, 500);
 	ret = e310_settings_set_rf_power((uint8_t)power);
 	if (ret < 0) {
 		shell_warn(sh, "RF power set but failed to save: %d", ret);
@@ -1423,7 +1235,9 @@ static int cmd_e310_info(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Reader info requested (check log for response)");
+	if (wait_for_e310_response(g_router_instance, 500) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -1548,7 +1362,9 @@ static int cmd_e310_send(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Sent %d bytes (enable debug mode to see response)", cmd_len);
+	if (wait_for_e310_response(g_router_instance, 1000) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -1631,7 +1447,9 @@ static int cmd_e310_single(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Single tag inventory requested");
+	if (wait_for_e310_response(g_router_instance, 1000) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -1659,7 +1477,8 @@ static int cmd_e310_reset(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	/* Reset router state */
+	wait_for_e310_response(g_router_instance, 500);
+
 	g_router_instance->inventory_active = false;
 	uart_router_set_mode(g_router_instance, ROUTER_MODE_IDLE);
 
@@ -1690,7 +1509,9 @@ static int cmd_e310_sn(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Reader SN requested (enable debug to see response)");
+	if (wait_for_e310_response(g_router_instance, 500) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -1717,7 +1538,9 @@ static int cmd_e310_temp(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Temperature measurement requested");
+	if (wait_for_e310_response(g_router_instance, 1000) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -1744,7 +1567,9 @@ static int cmd_e310_buffer_count(const struct shell *sh, size_t argc, char **arg
 		return ret;
 	}
 
-	shell_print(sh, "Tag count requested");
+	if (wait_for_e310_response(g_router_instance, 500) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -1771,7 +1596,9 @@ static int cmd_e310_buffer_clear(const struct shell *sh, size_t argc, char **arg
 		return ret;
 	}
 
-	shell_print(sh, "Memory buffer cleared");
+	if (wait_for_e310_response(g_router_instance, 500) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -1798,7 +1625,9 @@ static int cmd_e310_buffer_get(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Buffer data requested");
+	if (wait_for_e310_response(g_router_instance, 500) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -1831,9 +1660,10 @@ static int cmd_e310_buzzer(const struct shell *sh, size_t argc, char **argv)
 	} else if (strcmp(argv[1], "off") == 0) {
 		len = e310_build_enable_buzzer(&g_router_instance->e310_ctx, false);
 	} else if (strcmp(argv[1], "beep") == 0) {
-		uint8_t duration = (argc >= 3) ? atoi(argv[2]) : 1;
+		uint8_t duration_100ms = (argc >= 3) ? atoi(argv[2]) : 1;
+		uint8_t active_time = (duration_100ms > 127) ? 255 : (duration_100ms * 2);
 		len = e310_build_led_buzzer_control(&g_router_instance->e310_ctx,
-		                                     0, duration);
+		                                     active_time, 0, 1);
 	} else {
 		shell_error(sh, "Unknown option: %s", argv[1]);
 		return -EINVAL;
@@ -1851,6 +1681,7 @@ static int cmd_e310_buzzer(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	wait_for_e310_response(g_router_instance, 500);
 	shell_print(sh, "Buzzer command sent");
 	return 0;
 }
@@ -1869,7 +1700,9 @@ static int cmd_e310_led(const struct shell *sh, size_t argc, char **argv)
 
 	uint8_t led_state = (strcmp(argv[1], "on") == 0) ? 1 : 0;
 	int len = e310_build_led_buzzer_control(&g_router_instance->e310_ctx,
-	                                         led_state, 0);
+	                                         led_state,
+	                                         0,
+	                                         led_state);
 	if (len < 0) {
 		shell_error(sh, "Failed to build command: %d", len);
 		return len;
@@ -1882,6 +1715,7 @@ static int cmd_e310_led(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	wait_for_e310_response(g_router_instance, 500);
 	shell_print(sh, "LED %s", led_state ? "ON" : "OFF");
 	return 0;
 }
@@ -1914,6 +1748,7 @@ static int cmd_e310_antenna(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	wait_for_e310_response(g_router_instance, 500);
 	ret = e310_settings_set_antenna((uint8_t)config);
 	if (ret < 0) {
 		shell_warn(sh, "Antenna set but failed to save: %d", ret);
@@ -1944,8 +1779,36 @@ static int cmd_e310_freq(const struct shell *sh, size_t argc, char **argv)
 	uint8_t start = atoi(argv[2]);
 	uint8_t end = atoi(argv[3]);
 
+	/* Encode region + frequency points into MaxFre/MinFre bytes per protocol 0x22 */
+	uint8_t band_hi = 0;
+	uint8_t band_lo = 0;
+	switch (region) {
+	case 1:
+		band_hi = 0x00;
+		band_lo = 0x01;
+		break; /* China */
+	case 2:
+		band_hi = 0x00;
+		band_lo = 0x02;
+		break; /* US */
+	case 3:
+		band_hi = 0x01;
+		band_lo = 0x00;
+		break; /* Europe */
+	case 4:
+		band_hi = 0x00;
+		band_lo = 0x03;
+		break; /* Korea */
+	default:
+		shell_error(sh, "Invalid region %d (1=China, 2=US, 3=Europe, 4=Korea)", region);
+		return -EINVAL;
+	}
+
+	uint8_t max_fre = (band_hi << 6) | (end & 0x3F);
+	uint8_t min_fre = (band_lo << 6) | (start & 0x3F);
+
 	int len = e310_build_modify_frequency(&g_router_instance->e310_ctx,
-	                                       region, start, end);
+	                                       max_fre, min_fre);
 	if (len < 0) {
 		shell_error(sh, "Failed to build command: %d", len);
 		return len;
@@ -1958,6 +1821,7 @@ static int cmd_e310_freq(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	wait_for_e310_response(g_router_instance, 500);
 	ret = e310_settings_set_frequency(region, start, end);
 	if (ret < 0) {
 		shell_warn(sh, "Frequency set but failed to save: %d", ret);
@@ -1997,6 +1861,7 @@ static int cmd_e310_invtime(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	wait_for_e310_response(g_router_instance, 500);
 	ret = e310_settings_set_inventory_time(time);
 	if (ret < 0) {
 		shell_warn(sh, "Inventory time set but failed to save: %d", ret);
@@ -2038,6 +1903,9 @@ static int cmd_e310_gpio(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	if (wait_for_e310_response(g_router_instance, 500) < 0) {
+		shell_warn(sh, "No response from E310");
+	}
 	return 0;
 }
 
@@ -2132,27 +2000,6 @@ static int cmd_usb_hid(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_usb_cdc(const struct shell *sh, size_t argc, char **argv)
-{
-	if (argc < 2) {
-		shell_print(sh, "CDC output: %s", uart_router_is_cdc_enabled() ? "ON" : "OFF (muted)");
-		shell_print(sh, "Usage: usb cdc <on|off>");
-		return 0;
-	}
-
-	if (strcmp(argv[1], "on") == 0) {
-		uart_router_set_cdc_enabled(true);
-		shell_print(sh, "CDC output enabled");
-	} else if (strcmp(argv[1], "off") == 0) {
-		uart_router_set_cdc_enabled(false);
-		shell_print(sh, "CDC output disabled (muted)");
-	} else {
-		shell_error(sh, "Invalid argument: %s (use on/off)", argv[1]);
-		return -EINVAL;
-	}
-	return 0;
-}
-
 static int cmd_usb_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -2160,14 +2007,12 @@ static int cmd_usb_status(const struct shell *sh, size_t argc, char **argv)
 
 	shell_print(sh, "=== USB Status ===");
 	shell_print(sh, "HID output: %s", usb_hid_is_enabled() ? "ON" : "OFF (muted)");
-	shell_print(sh, "CDC output: %s", uart_router_is_cdc_enabled() ? "ON" : "OFF (muted)");
 	shell_print(sh, "HID ready: %s", usb_hid_is_ready() ? "yes" : "no");
 	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_usb,
 	SHELL_CMD(hid, NULL, "HID output on/off", cmd_usb_hid),
-	SHELL_CMD(cdc, NULL, "CDC output on/off", cmd_usb_cdc),
 	SHELL_CMD(status, NULL, "Show USB status", cmd_usb_status),
 	SHELL_SUBCMD_SET_END
 );

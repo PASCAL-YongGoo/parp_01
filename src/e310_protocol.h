@@ -149,6 +149,15 @@ extern "C" {
 /** Modify Baud Rate */
 #define E310_CMD_MODIFY_BAUD_RATE           0x28
 
+/** Enable/Disable Antenna Check */
+#define E310_CMD_ENABLE_ANTENNA_CHECK       0x66
+
+/** Modify Antenna Return Loss Threshold */
+#define E310_CMD_MODIFY_RETURN_LOSS         0x6E
+
+/** Measure Antenna Return Loss */
+#define E310_CMD_MEASURE_RETURN_LOSS        0x91
+
 /** Modify RF Power */
 #define E310_CMD_MODIFY_RF_POWER            0x2F
 
@@ -192,6 +201,13 @@ extern "C" {
 #define E310_CMD_SET_WORK_MODE              0x7F
 
 /** @} */
+
+/* Baud rate indices for 0x28 command */
+#define E310_BAUD_9600                      0
+#define E310_BAUD_19200                     1
+#define E310_BAUD_38400                     2
+#define E310_BAUD_57600                     5
+#define E310_BAUD_115200                    6
 
 /* ========================================================================
  * Response Codes
@@ -461,14 +477,14 @@ typedef struct {
  * @brief Select command parameters for 0x9A command
  */
 typedef struct {
-	uint8_t sel_param;          /**< Select parameter (0x00-0x03) */
-	uint8_t truncate;           /**< Truncation setting */
-	uint8_t target;             /**< Target (Session flag) */
-	uint8_t action;             /**< Action code (0x00-0x07) */
-	uint8_t mem_bank;           /**< Memory bank for matching */
-	uint16_t pointer;           /**< Bit pointer */
-	uint8_t mask_len;           /**< Mask length in bits */
+	uint8_t antenna;            /**< Antenna bitmask (1-8 port: 1 byte) */
+	uint8_t target;             /**< Select target (S0, S1, S2, S3, SL) */
+	uint8_t action;             /**< Select action (0-7) */
+	uint8_t mem_bank;           /**< Mask memory bank (EPC, TID, User) */
+	uint16_t pointer;           /**< Mask start bit address */
+	uint8_t mask_len;           /**< Mask bit length */
 	uint8_t mask[E310_MAX_MASK_LENGTH]; /**< Mask data */
+	uint8_t truncate;           /**< Truncation (0: disable, 1: enable) */
 } e310_select_params_t;
 
 /**
@@ -735,13 +751,11 @@ int e310_build_measure_temperature(e310_context_t *ctx);
  * @brief Build "Modify Frequency" command (0x22)
  *
  * @param ctx Context
- * @param region Region code (0x01=China, 0x02=US, 0x03=Europe, 0x04=Korea)
- * @param start_freq Start frequency index
- * @param end_freq End frequency index
+ * @param max_fre Encoded max frequency byte (band in bits 7:6, point in bits 5:0)
+ * @param min_fre Encoded min frequency byte (band in bits 7:6, point in bits 5:0)
  * @return Frame length ready to transmit, or negative error code
  */
-int e310_build_modify_frequency(e310_context_t *ctx, uint8_t region,
-                                 uint8_t start_freq, uint8_t end_freq);
+int e310_build_modify_frequency(e310_context_t *ctx, uint8_t max_fre, uint8_t min_fre);
 
 /**
  * @brief Build "Modify Reader Address" command (0x24)
@@ -765,7 +779,7 @@ int e310_build_modify_inventory_time(e310_context_t *ctx, uint8_t time_100ms);
  * @brief Build "Modify Baud Rate" command (0x28)
  *
  * @param ctx Context
- * @param baud_index Baud rate index (0=9600, 1=19200, 2=38400, 3=57600, 4=115200)
+ * @param baud_index Baud rate index (0=9600, 1=19200, 2=38400, 5=57600, 6=115200)
  * @return Frame length ready to transmit, or negative error code
  */
 int e310_build_modify_baud_rate(e310_context_t *ctx, uint8_t baud_index);
@@ -774,12 +788,13 @@ int e310_build_modify_baud_rate(e310_context_t *ctx, uint8_t baud_index);
  * @brief Build "LED/Buzzer Control" command (0x33)
  *
  * @param ctx Context
- * @param led_state LED state (0=off, 1=on)
- * @param buzzer_time Buzzer duration in 100ms units
+ * @param active_time ON time in 50ms units
+ * @param silent_time OFF time in 50ms units
+ * @param times Number of ON/OFF cycles
  * @return Frame length ready to transmit, or negative error code
  */
-int e310_build_led_buzzer_control(e310_context_t *ctx, uint8_t led_state,
-                                   uint8_t buzzer_time);
+int e310_build_led_buzzer_control(e310_context_t *ctx, uint8_t active_time,
+                                    uint8_t silent_time, uint8_t times);
 
 /**
  * @brief Build "Setup Antenna Mux" command (0x3F)
