@@ -11,16 +11,6 @@
       ],
       "description": "Efficient file system access to project, Zephyr source (read-only reference), and build output. Reduces token usage by using native file operations."
     },
-    "git": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-git",
-        "--repository",
-        "/home/lyg/work/zephyr_ws/zephyrproject/apps/parp_01"
-      ],
-      "description": "Git operations for this project's repository. Tracks changes to custom board definition and application code."
-    },
     "sequential-thinking": {
       "command": "npx",
       "args": [

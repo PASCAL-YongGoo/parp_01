@@ -90,14 +90,11 @@ int switch_control_init(void)
 		return ret;
 	}
 
-	/* Configure interrupt on falling edge (button press) */
-	ret = gpio_pin_interrupt_configure_dt(&sw0, GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure SW0 interrupt: %d", ret);
-		return ret;
-	}
+	/* Initialize debounce work (before callback registration) */
+	k_work_init_delayable(&debounce_work, debounce_handler);
 
-	/* Initialize and add GPIO callback */
+	/* Register callback BEFORE enabling interrupt to prevent
+	 * race condition where interrupt fires before handler is set */
 	gpio_init_callback(&sw0_cb_data, sw0_pressed, BIT(sw0.pin));
 	ret = gpio_add_callback(sw0.port, &sw0_cb_data);
 	if (ret < 0) {
@@ -105,8 +102,14 @@ int switch_control_init(void)
 		return ret;
 	}
 
-	/* Initialize debounce work */
-	k_work_init_delayable(&debounce_work, debounce_handler);
+	/* Now enable interrupt (callback is already registered) */
+	ret = gpio_pin_interrupt_configure_dt(&sw0, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure SW0 interrupt: %d", ret);
+		/* Rollback: remove callback on failure */
+		gpio_remove_callback(sw0.port, &sw0_cb_data);
+		return ret;
+	}
 
 	LOG_INF("Switch control initialized (SW0 on PD10)");
 	LOG_INF("Press SW0 to toggle inventory On/Off");

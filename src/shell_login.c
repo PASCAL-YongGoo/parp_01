@@ -399,7 +399,14 @@ int shell_login_init(void)
 		}
 	}
 
-	LOG_INF("Shell login initialized");
+	/*
+	 * Lock shell at boot: restrict to 'login' command only.
+	 * This ensures no shell commands are accessible without authentication.
+	 * shell_set_root_cmd("login") makes 'login' the only available command.
+	 */
+	shell_set_root_cmd("login");
+
+	LOG_INF("Shell login initialized (shell locked)");
 
 	if (password_storage_is_available()) {
 		LOG_INF("Password storage: EEPROM");

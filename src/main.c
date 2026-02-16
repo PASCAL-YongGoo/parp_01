@@ -231,12 +231,21 @@ int main(void)
 		LOG_WRN("E310 settings init failed: %d (using defaults)", ret);
 	}
 
-	/* Initialize shell login - DISABLED for testing
+	/* Apply persisted typing speed to USB HID */
+	uint16_t saved_speed = e310_settings_get_typing_speed();
+	if (saved_speed >= HID_TYPING_SPEED_MIN && saved_speed <= HID_TYPING_SPEED_MAX) {
+		usb_hid_set_typing_speed(saved_speed);
+		LOG_INF("Typing speed loaded from EEPROM: %u CPM", saved_speed);
+	}
+
+	/* Initialize shell login - locks shell until 'login <password>' */
+	/* TODO: Re-enable for production */
+#if 0
 	ret = shell_login_init();
 	if (ret < 0) {
 		LOG_WRN("Shell login init failed: %d", ret);
 	}
-	*/
+#endif
 
 	/* Initialize beep control */
 	ret = beep_control_init();
@@ -244,14 +253,13 @@ int main(void)
 		LOG_WRN("Beep control init failed: %d (beeper won't work)", ret);
 	}
 
-	/* Initialize RGB LED - DISABLED due to BUS FAULT
+	/* Initialize RGB LED */
 	ret = rgb_led_init();
 	if (ret < 0) {
 		LOG_WRN("RGB LED init failed: %d", ret);
 	} else {
 		rgb_led_set_pattern(1);
 	}
-	*/
 
 	/* Wait for USB CDC ACM to be ready and print banner */
 	LOG_INF("Waiting for USB CDC ACM...");

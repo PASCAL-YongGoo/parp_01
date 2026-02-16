@@ -135,16 +135,27 @@ int rgb_led_init(void)
 	gpio_reset_mask = BIT(pin + 16);    /* Upper 16 bits: reset */
 
 	/*
-	 * Get BSRR register address from device tree.
+	 * Get BSRR register address from the GPIO driver's config structure.
 	 * STM32H7 GPIO registers: base + 0x18 = BSRR
 	 *
-	 * Note: We derive the base address from the GPIO controller's
-	 * register address in device tree, avoiding hardcoded addresses.
-	 * GPIOG base: 0x58021800 (from STM32H7 reference manual)
+	 * The STM32 GPIO driver stores the port base address as the first
+	 * pointer after the common gpio_driver_config in its config struct.
+	 * We use a minimal struct definition to access it without including
+	 * the driver's private header.
+	 *
+	 * For GPIOG on STM32H7: base = 0x58021800
 	 */
-	const struct device *gpio_dev = rgb_led_pin.port;
-	uintptr_t gpio_base = (uintptr_t)DEVICE_MMIO_GET(gpio_dev);
+	struct gpio_stm32_config_min {
+		struct gpio_driver_config common;
+		uint32_t *base;
+	};
+	const struct gpio_stm32_config_min *gpio_cfg =
+		(const struct gpio_stm32_config_min *)rgb_led_pin.port->config;
+	uintptr_t gpio_base = (uintptr_t)gpio_cfg->base;
 	gpio_bsrr = (volatile uint32_t *)(gpio_base + 0x18);
+
+	LOG_INF("GPIO base=0x%08lx, BSRR=0x%08lx, pin=%u",
+		(unsigned long)gpio_base, (unsigned long)gpio_bsrr, pin);
 
 	/* Clear buffer */
 	memset(led_buffer, 0, sizeof(led_buffer));

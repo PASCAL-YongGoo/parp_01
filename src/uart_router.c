@@ -17,6 +17,7 @@
 #include "e310_settings.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/sys/atomic.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -32,6 +33,9 @@ static uart_router_t *g_router_instance;
 
 /* CDC output mute state (default: false = enabled for development/debug) */
 static bool cdc_muted = false;
+
+/* Re-entrance guard for uart_router_process() */
+static atomic_t process_lock = ATOMIC_INIT(0);
 
 /* Forward declarations */
 static void frame_assembler_reset(frame_assembler_t *fa);
@@ -312,7 +316,7 @@ static void uart4_callback(const struct device *dev, void *user_data)
 /**
  * @brief CDC ACM (bypass) interrupt callback
  */
-static void cdc_acm_callback(const struct device *dev, void *user_data)
+static void usart1_bypass_callback(const struct device *dev, void *user_data)
 {
 	uart_router_t *router = (uart_router_t *)user_data;
 
@@ -436,7 +440,7 @@ int uart_router_start(uart_router_t *router)
 
 	/* Configure CDC ACM interrupt for bypass */
 	if (router->uart1_ready && router->uart1) {
-		uart_irq_callback_user_data_set(router->uart1, cdc_acm_callback, router);
+		uart_irq_callback_user_data_set(router->uart1, usart1_bypass_callback, router);
 		uart_irq_rx_enable(router->uart1);
 		LOG_INF("CDC ACM bypass enabled");
 	}
@@ -767,6 +771,15 @@ void uart_router_process(uart_router_t *router)
 		return;
 	}
 
+	/*
+	 * Re-entrance guard: prevent concurrent calls from main loop
+	 * and shell thread (via wait_for_e310_response).
+	 * atomic_cas returns true if we successfully set 0->1.
+	 */
+	if (!atomic_cas(&process_lock, 0, 1)) {
+		return; /* Another thread is already processing */
+	}
+
 	/* Periodically check host connection status */
 	uart_router_check_host_connection(router);
 
@@ -788,6 +801,8 @@ void uart_router_process(uart_router_t *router)
 		process_inventory_mode(router);
 		break;
 	}
+
+	atomic_set(&process_lock, 0);
 }
 
 /* ========================================================================
@@ -963,7 +978,8 @@ int uart_router_connect_e310(uart_router_t *router)
 		return -ENODEV;
 	}
 
-	int len;
+	int len, ret;
+	int responses_ok = 0;
 	uint8_t saved_addr = router->e310_ctx.reader_addr;
 
 	/* Set mode to IDLE for command/response processing */
@@ -979,37 +995,61 @@ int uart_router_connect_e310(uart_router_t *router)
 	router->e310_ctx.reader_addr = E310_ADDR_BROADCAST;
 	len = e310_build_obtain_reader_info(&router->e310_ctx);
 	if (len > 0) {
-		uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
-		wait_for_e310_response(router, 200);
+		ret = uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
+		if (ret > 0 && wait_for_e310_response(router, 200) == 0) {
+			responses_ok++;
+		} else {
+			LOG_WRN("E310 broadcast query: no response");
+		}
 	}
 
 	/* Step 2: Get Reader Info with specific address (0x00) */
 	router->e310_ctx.reader_addr = E310_ADDR_DEFAULT;
 	len = e310_build_obtain_reader_info(&router->e310_ctx);
 	if (len > 0) {
-		uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
-		wait_for_e310_response(router, 200);
+		ret = uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
+		if (ret > 0 && wait_for_e310_response(router, 200) == 0) {
+			responses_ok++;
+		} else {
+			LOG_WRN("E310 address query: no response");
+		}
 	}
 
+	/* Step 3: Stop any running inventory */
 	len = e310_build_stop_immediately(&router->e310_ctx);
 	if (len > 0) {
-		uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
-		wait_for_e310_response(router, 200);
+		ret = uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
+		if (ret > 0) {
+			wait_for_e310_response(router, 200);
+			/* Stop response is optional - E310 may not be running */
+		}
 	}
 
+	/* Step 4: Set work mode */
 	len = e310_build_set_work_mode(&router->e310_ctx, 0x00);
 	if (len > 0) {
-		uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
-		wait_for_e310_response(router, 200);
+		ret = uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
+		if (ret > 0 && wait_for_e310_response(router, 200) == 0) {
+			responses_ok++;
+		} else {
+			LOG_WRN("E310 set work mode: no response");
+		}
 	}
 
 	/* Restore original address and mode */
 	router->e310_ctx.reader_addr = saved_addr;
 	uart_router_set_mode(router, saved_mode);
 
-	router->e310_connected = true;
-	LOG_INF("E310 connection sequence completed");
-	return 0;
+	/* Require at least one successful response to consider connected */
+	if (responses_ok > 0) {
+		router->e310_connected = true;
+		LOG_INF("E310 connected (%d/%d responses OK)", responses_ok, 3);
+		return 0;
+	}
+
+	LOG_ERR("E310 connection failed: no responses received");
+	router->e310_connected = false;
+	return -ETIMEDOUT;
 }
 
 int uart_router_start_inventory(uart_router_t *router)

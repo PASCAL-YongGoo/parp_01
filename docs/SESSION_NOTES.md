@@ -2154,4 +2154,308 @@ west flash
 | **E310 통신 디버깅** | ✅ **신규** |
 | **바이패스 성능 최적화** | ✅ **신규** |
 
-**전체 완성도**: E310 통신 분석 완료, 하드웨어 테스트 대기 🔧
+**전체 완성도**: E310 통신 분석 완료, 하드웨어 테스트 대기
+
+---
+
+## Session 10: 코드 리뷰 미수정 이슈 일괄 수정 (2026-02-16)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99 (v4.3.0-1307-ge3ef835ffec7)
+- **Build Status**: SUCCESS
+
+---
+
+### Accomplishments
+
+이전 코드 리뷰에서 발견된 미수정 이슈 6건을 일괄 수정.
+
+#### 1. [CRITICAL] Shell 로그인 시스템 재활성화 (main.c, shell_login.c)
+
+**문제**: `shell_login_init()`이 "for testing" 주석으로 비활성화되어 모든 Shell 명령어가 인증 없이 접근 가능.
+
+**수정 내용**:
+- `main.c:234`: `shell_login_init()` 호출 주석 해제
+- `shell_login.c:shell_login_init()`: 부팅 시 `shell_set_root_cmd("login")` 추가하여 Shell을 잠금 상태로 시작
+- `prj.conf`: `CONFIG_SHELL_START_OBSCURED=y` 활성화 (비밀번호 입력 시 마스킹)
+
+**이전**: 부팅 후 모든 명령어 즉시 사용 가능 (보안 없음)
+**이후**: 부팅 후 `login <password>` 입력 필수, 비밀번호 입력 시 화면에 표시 안 됨
+
+---
+
+#### 2. [CRITICAL] RGB LED BUS FAULT 수정 (rgb_led.c)
+
+**문제**: `DEVICE_MMIO_GET(gpio_dev)`가 STM32 GPIO 드라이버에서 잘못된 주소를 반환하여 BUS FAULT 발생.
+
+**원인**: STM32 GPIO 드라이버는 MMIO 패턴을 사용하지 않고, config 구조체에 base 주소를 직접 저장.
+
+**수정 내용**:
+- `DEVICE_MMIO_GET()` 대신 드라이버 config 구조체에서 GPIO base 주소 추출
+- 최소 구조체 정의로 private 헤더 의존성 없이 접근
+- 디버그 로그 추가 (GPIO base, BSRR 주소, 핀 번호)
+
+```c
+struct gpio_stm32_config_min {
+    struct gpio_driver_config common;
+    uint32_t *base;
+};
+const struct gpio_stm32_config_min *gpio_cfg =
+    (const struct gpio_stm32_config_min *)rgb_led_pin.port->config;
+uintptr_t gpio_base = (uintptr_t)gpio_cfg->base;
+gpio_bsrr = (volatile uint32_t *)(gpio_base + 0x18);
+```
+
+- `main.c:247`: RGB LED 초기화 주석 해제하여 재활성화
+
+---
+
+#### 3. [HIGH] uart_router_process() 재진입 방지 (uart_router.c)
+
+**문제**: `uart_router_process()`가 메인 루프와 Shell 스레드(`wait_for_e310_response()`)에서 동시 호출 가능. 링 버퍼와 프레임 어셈블러가 스레드 안전하지 않음.
+
+**수정 내용**:
+- `atomic_t process_lock` 추가
+- `uart_router_process()` 진입 시 `atomic_cas()` 로 잠금 획득
+- 이미 다른 스레드가 처리 중이면 즉시 반환
+- 처리 완료 후 `atomic_set()` 으로 잠금 해제
+
+---
+
+#### 4. [HIGH] E310 연결 시퀀스 반환값 검증 (uart_router.c)
+
+**문제**: `uart_router_connect_e310()`이 모든 send/receive 실패를 무시하고 항상 `e310_connected = true` 설정.
+
+**수정 내용**:
+- 각 단계의 `uart_router_send_uart4()` 및 `wait_for_e310_response()` 반환값 확인
+- 성공 응답 카운터 (`responses_ok`) 추가
+- 최소 1개 이상 응답 수신 시에만 `e310_connected = true`
+- 응답 없으면 `-ETIMEDOUT` 반환 및 `e310_connected = false`
+- 각 실패 단계에 경고 로그 추가
+
+---
+
+#### 5. [MEDIUM] 부팅 시 저장된 타이핑 속도 적용 (main.c)
+
+**문제**: EEPROM에 저장된 `typing_speed` 값이 부팅 시 `usb_hid` 모듈에 적용되지 않음.
+
+**수정 내용**:
+- `e310_settings_init()` 후 `e310_settings_get_typing_speed()` 호출
+- 유효 범위 확인 후 `usb_hid_set_typing_speed()` 로 적용
+
+---
+
+#### 6. [MEDIUM] switch_control.c 인터럽트 설정 순서 수정
+
+**문제**: 인터럽트가 콜백 등록 전에 활성화되어 레이스 컨디션 가능.
+
+**수정 내용**:
+- 순서 변경: debounce work 초기화 -> 콜백 등록 -> 인터럽트 활성화
+- 인터럽트 설정 실패 시 콜백 롤백 (`gpio_remove_callback()`)
+
+**이전 순서**: configure -> interrupt_enable -> callback_register
+**이후 순서**: configure -> work_init -> callback_register -> interrupt_enable
+
+---
+
+### 빌드 결과
+
+**Build Status**: SUCCESS
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      143784 B         1 MB     13.71%
+             RAM:       44048 B       320 KB     13.44%
+```
+
+**변화**:
+- Flash: 131,680 B -> 143,784 B (+12,104 B, RGB LED 모듈 + Shell 로그인 재활성화)
+- RAM: 41,024 B -> 44,048 B (+3,024 B, Shell obscured 모드 버퍼)
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/main.c             # shell_login_init() 재활성화, RGB LED 재활성화, 타이핑 속도 로드
+├── src/shell_login.c      # shell_set_root_cmd("login") 부팅 시 적용
+├── src/rgb_led.c          # DEVICE_MMIO_GET -> driver config 구조체 접근
+├── src/uart_router.c      # 재진입 방지, E310 연결 반환값 검증
+├── src/switch_control.c   # 인터럽트 설정 순서 수정
+├── prj.conf               # CONFIG_SHELL_START_OBSCURED=y
+
+문서:
+└── docs/SESSION_NOTES.md  # 이 문서
+```
+
+---
+
+### 수정 요약
+
+| # | 심각도 | 문제 | 파일 | 상태 |
+|---|--------|------|------|------|
+| 1 | CRITICAL | Shell 로그인 비활성화 | main.c, shell_login.c | FIXED |
+| 2 | CRITICAL | RGB LED BUS FAULT | rgb_led.c, main.c | FIXED |
+| 3 | HIGH | uart_router_process() 재진입 | uart_router.c | FIXED |
+| 4 | HIGH | E310 연결 실패 무시 | uart_router.c | FIXED |
+| 5 | MEDIUM | 타이핑 속도 미적용 | main.c | FIXED |
+| 6 | MEDIUM | 인터럽트 순서 오류 | switch_control.c | FIXED |
+
+---
+
+### 테스트 체크리스트
+
+#### Shell 로그인 테스트
+- [ ] 부팅 후 Shell이 잠금 상태인지 확인 (login만 사용 가능)
+- [ ] 올바른 비밀번호로 로그인 성공
+- [ ] 잘못된 비밀번호 3회 -> lockout 동작
+- [ ] 비밀번호 입력 시 화면에 표시 안 됨 (obscured)
+- [ ] logout 후 다시 잠금 상태
+
+#### RGB LED 테스트
+- [ ] `rgb test` 명령어로 색상 순환 확인
+- [ ] BUS FAULT 없이 정상 동작
+- [ ] GPIO base 주소 로그 확인 (0x58021800 예상)
+
+#### UART Router 테스트
+- [ ] `e310 connect` 실행 시 응답 확인 로그
+- [ ] E310 미연결 시 타임아웃 에러 반환
+- [ ] 인벤토리 중 Shell 명령어 동시 실행 안정성
+
+#### 스위치 테스트
+- [ ] SW0 버튼 토글 정상 동작
+- [ ] 빠른 연속 누름 시 디바운스 정상
+
+---
+
+### 프로젝트 완성도
+
+| 기능 | 상태 |
+|------|------|
+| USB CDC 콘솔 | OK |
+| USB HID 키보드 | OK |
+| E310 RFID 통신 | OK |
+| 스위치 인벤토리 제어 | OK |
+| Shell 로그인 보안 | OK (재활성화) |
+| EEPROM 비밀번호 저장 | OK |
+| 마스터 패스워드 | OK |
+| 양산용 보안 강화 | OK |
+| DI/DO 코드 품질 개선 | OK |
+| E310 통신 디버깅 | OK |
+| 바이패스 성능 최적화 | OK |
+| **코드 리뷰 이슈 수정** | OK **신규** |
+
+**전체 완성도**: 코드 리뷰 이슈 전체 수정 완료, 하드웨어 테스트 대기
+
+---
+
+## Session 11: Console CDC ACM 복원 및 개발 편의성 개선 (2026-02-16)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99 (v4.3.0-6202-g1b23efc6121e)
+- **Build Status**: SUCCESS (237/237)
+
+---
+
+### Accomplishments
+
+#### 1. Console/Shell을 CDC ACM으로 복원 (근본 원인 수정)
+
+**문제**: Shell 키보드 입력이 화면에 전혀 표시되지 않음.
+
+**근본 원인 분석**:
+- DTS에서 `zephyr,console`과 `zephyr,shell-uart`가 `&usart1`로 설정
+- `uart_router_start()`에서 USART1에 bypass용 ISR(`cdc_acm_callback`)을 등록
+- Shell backend의 RX 인터럽트가 UART router에 의해 덮어써짐
+- Shell 출력은 polling TX를 사용하므로 정상 동작, 입력만 차단
+
+**수정 내용**:
+- `nucleo_h723zg_parp01.dts`: chosen 노드를 `&cdc_acm_uart0`으로 변경
+- USART1은 bypass 전용, CDC ACM은 Shell 전용으로 완전 분리
+- ISR 충돌 원천 제거
+
+```dts
+chosen {
+    zephyr,console = &cdc_acm_uart0;
+    zephyr,shell-uart = &cdc_acm_uart0;
+};
+```
+
+**트레이드오프**: USB 열거 전 초기 부팅 `printk` 메시지 유실 (LED blink으로 부팅 확인 가능)
+
+#### 2. Shell 로그인 개발 모드 비활성화
+
+**목적**: 개발 단계에서 매번 비밀번호 입력 불필요하도록 변경.
+
+**수정 내용**:
+- `main.c`: `shell_login_init()` 호출을 `#if 0`으로 비활성화
+- `prj.conf`: `CONFIG_SHELL_START_OBSCURED=y` 주석 처리
+- 프로덕션 복원: `#if 0` → `#if 1`, prj.conf 주석 해제
+
+#### 3. UART router 콜백 함수명 정리
+
+**수정**: `cdc_acm_callback` → `usart1_bypass_callback` (2곳)
+- 함수가 실제로 USART1 bypass를 처리하므로 역할에 맞는 이름으로 변경
+- 기능 변경 없음, 가독성 개선
+
+#### 4. MCP 설정 정리
+
+- `uvx` 설치 (v0.10.2) — `fetch` MCP 서버 실행에 필요
+- `.mcp.json`에서 git MCP 서버 제거 (gh CLI로 대체)
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      143232 B         1 MB     13.66%
+             RAM:       44048 B       320 KB     13.44%
+```
+
+---
+
+### 변경된 파일
+
+```
+boards/arm/nucleo_h723zg_parp01/nucleo_h723zg_parp01.dts  # chosen → cdc_acm_uart0
+src/main.c                                                  # shell_login_init() #if 0
+src/uart_router.c                                           # callback rename
+prj.conf                                                    # OBSCURED 주석 처리
+.mcp.json                                                   # git MCP 제거
+```
+
+---
+
+### 아키텍처 변경 (디바이스 역할 분리)
+
+```
+변경 전 (충돌):
+  USART1 ← Console + Shell + Bypass (ISR 충돌)
+  CDC ACM ← 미사용
+
+변경 후 (분리):
+  USART1 ← Bypass 전용 (PC config ↔ E310)
+  CDC ACM ← Console + Shell (키보드 입력/출력)
+```
+
+---
+
+### 프로젝트 완성도
+
+| 기능 | 상태 |
+|------|------|
+| USB CDC 콘솔 | OK (CDC ACM 복원) |
+| USB HID 키보드 | OK |
+| E310 RFID 통신 | OK |
+| 스위치 인벤토리 제어 | OK |
+| Shell 로그인 보안 | OK (개발 모드 비활성화) |
+| EEPROM 비밀번호 저장 | OK |
+| USART1 Bypass | OK (Shell과 분리) |
+| 코드 리뷰 이슈 수정 | OK |
+| **Console/Shell ISR 충돌 해결** | OK **신규** |
+
+**전체 완성도**: Shell 입력 문제 해결, CDC ACM 콘솔 복원 완료
