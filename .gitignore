@@ -15,9 +15,11 @@ __pycache__/
 *.pyc
 *.pyo
 
-# IDE
+# IDE / AI Agent config
 .vscode/
 .idea/
+.mcp.json
+.claude/
 *.swp
 *.swo
 *~

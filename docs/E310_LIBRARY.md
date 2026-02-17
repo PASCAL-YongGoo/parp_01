@@ -537,7 +537,7 @@ Response: 05 00 51 00 CRC CRC
 ### Build Command
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 west build -b nucleo_h723zg_parp01 apps/parp_01
 ```

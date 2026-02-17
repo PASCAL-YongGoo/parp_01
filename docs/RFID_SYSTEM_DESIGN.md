@@ -743,7 +743,7 @@ Priority: CONFIG mode blocks INVENTORY mode
 ### Immediate Actions
 1. **Hardware Test** (if not done yet)
    ```bash
-   cd /home/lyg/work/zephyr_ws/zephyrproject
+   cd $HOME/work/zephyr_ws/zephyrproject
    source .venv/bin/activate
    west flash
    ```

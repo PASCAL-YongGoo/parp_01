@@ -11,7 +11,7 @@
 - **Location**: Remote PC
 - **Zephyr Version**: 4.3.99 (v4.3.0-1307-ge3ef835ffec7)
 - **Toolchain**: Zephyr SDK 0.17.4
-- **Workspace**: `/home/lyg/work/zephyr_ws/zephyrproject`
+- **Workspace**: `$HOME/work/zephyr_ws/zephyrproject`
 
 ### Accomplishments
 
@@ -91,7 +91,7 @@ Following reference project patterns:
 **Build Status**: ✅ SUCCESS
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 .venv/bin/west build -b nucleo_h723zg_parp01 apps/parp_01 -p auto
 ```
 
@@ -155,7 +155,7 @@ cd /home/lyg/work/zephyr_ws/zephyrproject
 #### Hardware Verification (CRITICAL)
 🔧 **Flash firmware to board and verify operation**:
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 .venv/bin/west flash
 ```
 
@@ -200,7 +200,7 @@ Expected behavior after flashing:
 
 ```bash
 # From workspace root
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 
 # Activate virtual environment
 source .venv/bin/activate
@@ -248,7 +248,7 @@ west flash
 - **Location**: Remote PC (same as Session 1)
 - **Zephyr Version**: 4.3.99 (v4.3.0-1307-ge3ef835ffec7)
 - **Toolchain**: Zephyr SDK 0.17.4
-- **Workspace**: `/home/lyg/work/zephyr_ws/zephyrproject`
+- **Workspace**: `$HOME/work/zephyr_ws/zephyrproject`
 
 ### Accomplishments
 
@@ -294,7 +294,7 @@ Reviewed all commits since project initialization:
 **Build Status**: ✅ SUCCESS
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 .venv/bin/west build -b nucleo_h723zg_parp01 apps/parp_01
 ```
 
@@ -398,7 +398,7 @@ Current Implementation:
 #### Immediate Hardware Testing (CRITICAL)
 🔧 **Flash firmware to board**:
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 .venv/bin/west flash
 ```
 
@@ -478,7 +478,7 @@ cd /home/lyg/work/zephyr_ws/zephyrproject
 
 ```bash
 # Navigate to workspace root
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 
 # Activate virtual environment
 source .venv/bin/activate
@@ -661,7 +661,7 @@ docs/
 #### 즉시 수행 필요
 1. **빌드 테스트** (Linux 환경에서)
    ```bash
-   cd /home/lyg/work/zephyr_ws/zephyrproject
+   cd $HOME/work/zephyr_ws/zephyrproject
    source .venv/bin/activate
    west build -b nucleo_h723zg_parp01 apps/parp_01 -p auto
    ```
@@ -716,7 +716,7 @@ Linux 환경에서 다음 항목 확인:
 
 2. Linux 환경에서 pull/sync 후 빌드:
    ```bash
-   cd /home/lyg/work/zephyr_ws/zephyrproject
+   cd $HOME/work/zephyr_ws/zephyrproject
 
    # 파일 동기화 확인
    cd apps/parp_01
@@ -964,7 +964,7 @@ uart:~$ hid test          # 샘플 EPC 전송
 ### Build Instructions
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 
 # 빌드
@@ -1152,7 +1152,7 @@ west flash
 ### Build Instructions
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 
 # 빌드
@@ -1448,7 +1448,7 @@ west flash
 ### Next Session Build Instructions
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 
 # 빌드
@@ -1651,7 +1651,7 @@ aliases {
 ### Build Instructions
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 
 # 빌드
@@ -1858,7 +1858,7 @@ Memory region         Used Size  Region Size  %age Used
 ### Build Instructions
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 
 # 빌드
@@ -2126,7 +2126,7 @@ uart:~$ e310 stop       # Inventory 중지
 ### Build Instructions
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 
 # 빌드
@@ -2663,7 +2663,7 @@ Memory region         Used Size  Region Size  %age Used
 ### Build Instructions
 
 ```bash
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 
 # 빌드

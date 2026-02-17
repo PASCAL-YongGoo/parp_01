@@ -365,7 +365,7 @@ CONFIG_UART_LINE_CTRL=y
 
 1. **즉시 실행**: 하드웨어 테스트
    ```bash
-   cd /home/lyg/work/zephyr_ws/zephyrproject
+   cd $HOME/work/zephyr_ws/zephyrproject
    source .venv/bin/activate
    west flash
    ```

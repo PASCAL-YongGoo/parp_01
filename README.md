@@ -7,7 +7,7 @@
 ### Build and Flash
 ```bash
 # Navigate to workspace root
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 
 # Activate virtual environment
 source .venv/bin/activate

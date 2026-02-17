@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Zephyr RTOS application named `parp_01` for a custom board based on STM32H723ZG. The project includes a custom board definition and uses a complete board structure (not overlay-based).
 
-**Development Environment**: This project is part of a larger Zephyr workspace at `/home/lyg/work/zephyr_ws/zephyrproject`.
+**Development Environment**: This project is part of a larger Zephyr workspace at `$HOME/work/zephyr_ws/zephyrproject`.
 
 ## CRITICAL: Development Rules
 
@@ -25,16 +25,16 @@ This is a Zephyr RTOS application named `parp_01` for a custom board based on ST
 
 ```bash
 # Option 1: Activate the venv (recommended)
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 west build -b nucleo_h723zg_parp01 apps/parp_01
 
 # Option 2: Use venv directly without activation
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 .venv/bin/west build -b nucleo_h723zg_parp01 apps/parp_01
 ```
 
-**Why**: The virtual environment (`/home/lyg/work/zephyr_ws/zephyrproject/.venv/`) contains:
+**Why**: The virtual environment (`$HOME/work/zephyr_ws/zephyrproject/.venv/`) contains:
 - `west` - Zephyr's meta-tool
 - Python dependencies for the build system
 - CMake integration tools
@@ -42,11 +42,11 @@ cd /home/lyg/work/zephyr_ws/zephyrproject
 Without the venv, all west commands will fail.
 
 ### Rule 3: Always Build from Workspace Root
-**⚠️ Build commands MUST be run from `/home/lyg/work/zephyr_ws/zephyrproject`**
+**⚠️ Build commands MUST be run from `$HOME/work/zephyr_ws/zephyrproject`**
 
 ```bash
 # ✅ CORRECT
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 .venv/bin/west build -b nucleo_h723zg_parp01 apps/parp_01
 
 # ❌ WRONG - do not build from app directory
@@ -54,7 +54,7 @@ cd apps/parp_01
 west build -b nucleo_h723zg_parp01  # This will fail!
 ```
 
-**Build Output**: All artifacts go to `/home/lyg/work/zephyr_ws/zephyrproject/build/`
+**Build Output**: All artifacts go to `$HOME/work/zephyr_ws/zephyrproject/build/`
 
 ## Build System
 
@@ -62,7 +62,7 @@ west build -b nucleo_h723zg_parp01  # This will fail!
 
 ```bash
 # Navigate to workspace root
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 
 # Activate virtual environment
 source .venv/bin/activate
@@ -152,7 +152,7 @@ The current application ([src/main.c](src/main.c)) is a minimal bring-up applica
 
 ## Workspace Context
 
-This application is part of a larger Zephyr workspace at `/home/lyg/work/zephyr_ws/zephyrproject/` which contains:
+This application is part of a larger Zephyr workspace at `$HOME/work/zephyr_ws/zephyrproject/` which contains:
 - `zephyr/` - Zephyr RTOS source tree (**DO NOT MODIFY**)
 - `modules/` - Zephyr modules and HALs (**DO NOT MODIFY**)
 - `apps/` - Application projects (this project is in `apps/parp_01/`)
@@ -167,11 +167,11 @@ This application is part of a larger Zephyr workspace at `/home/lyg/work/zephyr_
 
 ```bash
 # From workspace root
-cd /home/lyg/work/zephyr_ws/zephyrproject
+cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
 
 # Or from project directory (relative path)
-cd /home/lyg/work/zephyr_ws/zephyrproject/apps/parp_01
+cd $HOME/work/zephyr_ws/zephyrproject/apps/parp_01
 source ../../.venv/bin/activate
 ```
 
