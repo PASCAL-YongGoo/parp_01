@@ -16,16 +16,9 @@
  * Typing Speed Configuration
  * ======================================================================== */
 
-/** Minimum typing speed in CPM (Characters Per Minute) */
 #define HID_TYPING_SPEED_MIN     100
-
-/** Maximum typing speed in CPM */
-#define HID_TYPING_SPEED_MAX     1500
-
-/** Default typing speed in CPM (~600 CPM = 10 chars/sec) */
-#define HID_TYPING_SPEED_DEFAULT 600
-
-/** Typing speed step size */
+#define HID_TYPING_SPEED_MAX     12000
+#define HID_TYPING_SPEED_DEFAULT 6000   /* 6000 CPM = 100 chars/sec */
 #define HID_TYPING_SPEED_STEP    100
 
 /**

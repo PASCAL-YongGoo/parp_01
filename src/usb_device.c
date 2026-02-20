@@ -12,7 +12,7 @@
 LOG_MODULE_REGISTER(usb_device, LOG_LEVEL_INF);
 
 #define PARP_USB_VID 0x2FE3
-#define PARP_USB_PID 0x0001
+#define PARP_USB_PID 0x0100
 
 USBD_DEVICE_DEFINE(parp_usbd,
 		   DEVICE_DT_GET(DT_NODELABEL(zephyr_udc0)),
@@ -20,7 +20,7 @@ USBD_DEVICE_DEFINE(parp_usbd,
 
 USBD_DESC_LANG_DEFINE(parp_lang);
 USBD_DESC_STRING_DEFINE(parp_mfr, "PARP", 1);
-USBD_DESC_STRING_DEFINE(parp_product, "PARP-01", 2);
+USBD_DESC_STRING_DEFINE(parp_product, "PARP-01 HID Keyboard", 2);
 USBD_DESC_STRING_DEFINE(parp_sn, "PARP01-0001", 3);
 
 USBD_DESC_CONFIG_DEFINE(parp_fs_cfg_desc, "FS Configuration");
@@ -31,15 +31,11 @@ static const uint8_t attributes = 0;
 USBD_CONFIGURATION_DEFINE(parp_fs_config, attributes, 100, &parp_fs_cfg_desc);
 USBD_CONFIGURATION_DEFINE(parp_hs_config, attributes, 100, &parp_hs_cfg_desc);
 
+/* HID-only: class defined at interface level, device-level = (0,0,0) */
 static void parp_fix_code_triple(struct usbd_context *ctx,
 				 const enum usbd_speed speed)
 {
-#if defined(CONFIG_USBD_CDC_ACM_CLASS)
-	usbd_device_set_code_triple(ctx, speed,
-				    USB_BCC_MISCELLANEOUS, 0x02, 0x01);
-#else
 	usbd_device_set_code_triple(ctx, speed, 0, 0, 0);
-#endif
 }
 
 struct usbd_context *usb_device_init(usbd_msg_cb_t msg_cb)

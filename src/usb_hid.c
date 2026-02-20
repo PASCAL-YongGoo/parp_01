@@ -84,18 +84,21 @@ static inline uint32_t cpm_to_delay_ms(uint16_t cpm)
  * ======================================================================== */
 
 /**
- * @brief Convert ASCII character to HID keyboard keycode
+ * @brief Convert ASCII character to HID keyboard keycode and modifier
  *
  * Supports:
  * - Digits: 0-9
- * - Uppercase letters: A-F (for hex)
+ * - Letters: A-F (for hex, always sent as uppercase with Shift modifier)
  * - Space character
  *
  * @param c ASCII character (will be converted to uppercase internally)
+ * @param modifier Output: HID modifier byte (0x02 = Left Shift for uppercase)
  * @return HID keycode, or 0 if invalid character
  */
-static uint8_t ascii_to_hid_keycode(char c)
+static uint8_t ascii_to_hid_keycode(char c, uint8_t *modifier)
 {
+	*modifier = 0;
+
 	/* Convert to uppercase */
 	c = toupper((unsigned char)c);
 
@@ -107,8 +110,9 @@ static uint8_t ascii_to_hid_keycode(char c)
 	else if (c == '0') {
 		return 0x27;  /* 0x27 = '0' */
 	}
-	/* Letters A-F (hex) */
+	/* Letters A-F (hex) — send with Left Shift for uppercase */
 	else if (c >= 'A' && c <= 'F') {
+		*modifier = 0x02;  /* Left Shift */
 		return 0x04 + (c - 'A');  /* 0x04 = 'A', 0x09 = 'F' */
 	}
 	/* Space */
@@ -266,19 +270,18 @@ int usb_hid_send_epc(const uint8_t *epc, size_t len)
 
 	int result = 0;
 
-	/* Phase 4.2: Send each character (toupper is done in ascii_to_hid_keycode) */
 	for (size_t i = 0; i < len; i++) {
 		char c = (char)epc[i];
 
-		/* Get HID keycode (includes uppercase conversion) */
-		uint8_t keycode = ascii_to_hid_keycode(c);
+		uint8_t modifier = 0;
+		uint8_t keycode = ascii_to_hid_keycode(c, &modifier);
 		if (keycode == 0) {
 			LOG_DBG("Skipping invalid character: 0x%02X", (uint8_t)c);
-			continue;  /* Skip invalid characters */
+			continue;
 		}
 
-		/* Key Press: report[0]=modifiers, report[2]=keycode */
 		memset(hid_report, 0, HID_KBD_REPORT_SIZE);
+		hid_report[0] = modifier;
 		hid_report[2] = keycode;
 		int ret = hid_device_submit_report(hid_dev, HID_KBD_REPORT_SIZE,
 						   hid_report);
