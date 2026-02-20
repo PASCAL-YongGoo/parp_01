@@ -2660,15 +2660,521 @@ Memory region         Used Size  Region Size  %age Used
 
 ---
 
+## Session 14 — USB CDC ACM → UART1 마이그레이션 + USB PCD_Init 오류 진단 (2026-02-20)
+
+### 목표
+- USB CDC ACM 콘솔에서 "messages dropped" 문제 해결
+- USART1을 디버그 콘솔로 전환, USB는 HID Keyboard 전용으로 변경
+- USB PCD_Init 실패 오류 진단 및 워크어라운드 적용
+
+### 수행 내용
+
+#### Phase 1: CDC ACM → UART1 마이그레이션 ✅
+- **DTS**: `zephyr,console`/`zephyr,shell-uart`를 `&cdc_acm_uart0` → `&usart1`로 변경, `cdc_acm_uart0` 노드 제거
+- **prj.conf**: `CONFIG_USBD_CDC_ACM_CLASS=y`, `CONFIG_UART_LINE_CTRL=y` 제거
+- **main.c**: 5초 USB CDC 대기 코드 제거, 배너 업데이트
+- **uart_router.c/h**: 통계 라벨 업데이트
+- **usb_device.c**: PID `0x0001`→`0x0100`, 제품명 "PARP-01 HID Keyboard", CDC 관련 데드코드 제거
+
+#### Phase 2: 코드 리뷰 클린업 ✅
+- Oracle 코드 리뷰 진행, 모든 우려사항 해결
+
+#### Phase 3: USB PCD_Init 오류 진단 ✅
+- 부팅 로그에서 `PCD_Init failed, 1` 발견 (8.2초 딜레이 후)
+- **원인**: `USB_CoreReset()` 타임아웃 — STM32H7 시리즈 알려진 이슈
+  - [STM32CubeH7 Issue #163](https://github.com/STMicroelectronics/STM32CubeH7/issues/163)
+  - [ST FAQ: USB core soft reset stuck](https://community.st.com/t5/stm32-mcus/faq-troubleshooting-a-usb-core-soft-reset-stuck-on-an-stm32/ta-p/803224)
+- **PHY/Speed 설정 확인**: 매크로 체인 전체 추적 완료 — 설정 정확
+- **에러 경로**: `usbd_enable()` → `udc_stm32_init()` → `HAL_PCD_Init()` → `USB_CoreReset()` → 타임아웃
+
+#### Phase 4: USB 워크어라운드 적용 ✅ (플래시 테스트 대기중)
+- `main.c`에 `usb_otg_hs_pre_init()` 함수 추가 — RCC 페리페럴 리셋
+- `prj.conf`에 USB 디버그 로깅 추가
+- **빌드 성공**: FLASH 142268B (13.57%), RAM 36488B (11.14%)
+
+### 발견된 주요 사항
+1. PCD_Init 실패는 마이그레이션과 무관 — 이전에는 USB CDC가 콘솔이라 오류 메시지 출력 불가
+2. `stm32_usb_pwr.c`의 `LL_PWR_DisableUSBReg()` 호출이 문제 가능성 있음
+3. RCC 리셋이 안 되면 다음 단계: `LL_PWR_EnableUSBReg()` 워크어라운드
+
+### 수정된 파일
+- `boards/arm/nucleo_h723zg_parp01/nucleo_h723zg_parp01.dts`
+- `prj.conf`
+- `src/main.c`
+- `src/usb_device.c`
+- `src/uart_router.c`
+- `src/uart_router.h`
+
+### 빌드 상태
+- **결과**: ✅ 성공 (0 errors, 0 warnings)
+- **FLASH**: 142,268 / 1,048,576 bytes (13.57%)
+- **RAM**: 36,488 / 327,680 bytes (11.14%)
+
+### 다음 단계
+1. ⏳ 펌웨어 플래시 후 부팅 로그 확인
+2. ⏳ RCC 리셋 실패 시 USB 레귤레이터 워크어라운드 적용
+3. ⏳ USB 디버그 로깅 제거 (수정 확인 후)
+4. ⏳ EPC 데이터 → UART1 출력 검증
+5. ⏳ 변경사항 커밋
+
+---
+
+## Session 15: `e310 start` 버그 수정 + 설정 자동 적용 + 클린업 (2026-02-20)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99
+- **Build Status**: ✅ SUCCESS (FLASH 139,572B 13.31%, RAM 36,488B 11.14%)
+
+---
+
+### Accomplishments
+
+#### 1. [CRITICAL] `e310 start` 태그 읽기 실패 근본 원인 발견 및 수정
+
+**증상**: `e310 send 09 00 01 04 00 00 80 32`로 보내면 태그가 읽히는데, `e310 start`로 보내면 동일한 TX 바이트임에도 E310으로부터 응답이 전혀 없음.
+
+**근본 원인**: `uart_router_set_mode()`가 모드 변경 시 `safe_ring_buf_reset_all()`을 호출하여 **TX 링 버퍼까지 리셋**하고 있었음.
+
+`uart_router_start_inventory()` 실행 순서:
+```
+1. uart_router_send_uart4()  → TX 링 버퍼에 명령 데이터 큐잉
+2. uart_router_set_mode(INVENTORY)  → TX 링 버퍼 리셋! 💥
+→ ISR이 TX 데이터를 E310으로 전송하기 전에 데이터가 삭제됨
+→ E310은 명령을 수신하지 못해 응답하지 않음
+```
+
+**수정 내용**:
+1. `uart_router_set_mode()`: `safe_ring_buf_reset_all()` → `safe_uart4_rx_reset()` 변경 (RX만 리셋, TX 보존)
+2. `uart_router_start_inventory()`: 모드 변경을 TX 전에 수행하도록 순서 변경
+3. `uart_router_stop_inventory()`: 모드 변경을 함수에서 제거, 호출부로 이동 (TX 완료 후 변경)
+4. `cmd_e310_stop()`: `wait_for_e310_response()` 후 `uart_router_set_mode(IDLE)` 호출
+5. `on_inventory_toggle()` (main.c): stop 후 mode IDLE 설정 추가
+6. `safe_ring_buf_reset_all()` 함수 삭제 (더 이상 사용되지 않음)
+
+**wait 타임아웃**: `cmd_e310_start`의 `wait_for_e310_response` 500ms → 3000ms로 증가 (ScanTime=5초 고려)
+
+---
+
+#### 2. Connect 시퀀스에 EEPROM RF Power 자동 적용
+
+**문제**: E310은 전원 리셋 시 RF power가 초기값(저출력)으로 돌아가므로, `e310 connect` 후 매번 수동으로 `e310 power 30` 실행 필요.
+
+**수정**: `uart_router_connect_e310()` 연결 성공 시 `e310_settings_get_rf_power()`로 저장된 RF power를 자동 적용.
+
+---
+
+#### 3. 0xFB Status Code 추가
+
+- `e310_protocol.h`: `E310_STATUS_NO_TAG` (0xFB) 정의 추가
+- `e310_protocol.c`: `e310_get_status_desc()`에 "No Tag Found" 추가
+
+---
+
+#### 4. USB 디버그 로깅 제거
+
+- `prj.conf`: `CONFIG_UDC_DRIVER_LOG_LEVEL_DBG=y`, `CONFIG_STM32_USB_COMMON_LOG_LEVEL_DBG=y` 삭제
+- Flash 142,316B → 139,572B (-2,744B 절약)
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/uart_router.c       # 🔴 핵심 버그 수정: TX 링버퍼 보존, 실행 순서 변경
+├── src/main.c              # stop 후 mode IDLE 설정
+├── src/e310_protocol.c     # 0xFB status desc 추가
+├── src/e310_protocol.h     # E310_STATUS_NO_TAG 정의
+├── prj.conf                # USB debug 로깅 제거
+```
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      139572 B         1 MB     13.31%
+             RAM:       36488 B       320 KB     11.14%
+```
+
+---
+
+### 테스트 체크리스트 (하드웨어)
+
+- [ ] `e310 connect` → 연결 성공 + RF power 자동 적용 확인
+- [ ] `e310 start` → 태그 읽기 동작 확인 (RX 데이터 출력)
+- [ ] `e310 stop` → 정상 중지
+- [ ] SW0 버튼으로 인벤토리 토글
+- [ ] USB HID 키보드로 EPC 출력 확인
+
+---
+
+### 프로젝트 완성도
+
+| 기능 | 상태 |
+|------|------|
+| USB CDC → UART1 마이그레이션 | ✅ HW 검증 완료 |
+| USB PCD_Init 수정 | ✅ HW 검증 완료 |
+| E310 `e310 start` 태그 읽기 | ✅ **근본 원인 수정** (HW 테스트 대기) |
+| EEPROM RF Power 자동 적용 | ✅ 구현 완료 |
+| 0xFB Status Code | ✅ 추가 완료 |
+| USB debug 로깅 제거 | ✅ 제거 완료 |
+| USB HID 키보드 EPC 출력 | ⏳ 인벤토리 수정 후 테스트 대기 |
+
+---
+
 ### Build Instructions
 
 ```bash
 cd $HOME/work/zephyr_ws/zephyrproject
 source .venv/bin/activate
-
-# 빌드
 west build -b nucleo_h723zg_parp01 apps/parp_01 -p auto
-
-# 플래시
 west flash
 ```
+
+---
+
+## Session 16: Tag Inventory (0x01) EPC 파싱 + 중복 필터 구현 (2026-02-20)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99
+- **Build Status**: ✅ SUCCESS (FLASH 140,320B 13.38%, RAM 36,488B 11.14%)
+
+---
+
+### Accomplishments
+
+#### 1. Tag Inventory (0x01) EPC 파싱 구현
+
+**문제**: `e310 start`로 태그를 읽으면 부저가 울려 태그가 읽히고 있지만, EPC를 파싱하지 않아 UART1 콘솔에 출력되지 않고 HID 키보드로도 전송되지 않음.
+
+**구현 내용** (`uart_router.c`, Tag Inventory handler):
+- 응답 데이터에서 `Ant(1) + Num(1)` 파싱
+- `Num`개의 EPC_ID 블록을 `e310_parse_tag_data()`로 순차 파싱
+- PC 워드 스킵 처리: bit7=0일 때 Data = PC(2)+EPC이므로 PC 2바이트를 건너뛰어 순수 EPC 추출
+- bit7=1 (EPC+TID 결합)인 경우 `e310_parse_tag_data()`가 이미 PC를 건너뛰므로 추가 처리 불필요
+
+**EPC 처리 파이프라인**:
+```
+E310 Tag Inventory 응답
+→ frame[4]=Ant, frame[5]=Num
+→ frame[6..] = EPC_ID 블록들
+→ e310_parse_tag_data()로 각 블록 파싱
+→ PC(2바이트) 스킵하여 순수 EPC 추출
+→ epc_filter_check() 중복 필터
+→ 새로운 EPC: LOG_INF() + usb_hid_send_epc() + beep_control_trigger()
+→ 중복 EPC: LOG_DBG() (무시)
+```
+
+---
+
+#### 2. EPC 중복 필터 적용
+
+**기존 상태**: `epc_filter_check()`가 Auto-Upload (0xEE, Fast Inventory) 경로에만 적용되어 있었음.
+
+**수정**: Tag Inventory (0x01) 응답 핸들러에도 동일한 필터 적용.
+- 새로운/디바운스 만료 EPC → HID 전송 + 콘솔 출력 + 비프
+- 중복 EPC → `LOG_DBG`로 무시
+
+---
+
+#### 3. EPC 디바운스 기본값 변경
+
+- `uart_router.h`: `EPC_DEBOUNCE_DEFAULT_SEC` 3 → 1 변경
+- 사용자 요구: "동일 테그를 1초에 1번씩만 읽게 해줘"
+- `hid debounce <seconds>` 셸 명령으로 런타임 변경 가능
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/uart_router.c       # Tag Inventory EPC 파싱 + 필터 (line 483~565)
+├── src/uart_router.h       # EPC_DEBOUNCE_DEFAULT_SEC 3→1
+```
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      140320 B         1 MB     13.38%
+             RAM:       36488 B       320 KB     11.14%
+```
+
+**변화**: Flash 139,572B → 140,320B (+748B, EPC 파싱 코드)
+
+---
+
+### 테스트 체크리스트 (하드웨어)
+
+- [ ] `e310 connect` → 연결 + RF power 자동 적용
+- [ ] `e310 start` → 태그 읽기 → UART1에 EPC 출력 확인
+- [ ] 동일 태그 연속 읽기 → 1초 간격으로만 출력 (디바운스)
+- [ ] USB HID 키보드로 EPC 출력 확인
+- [ ] `hid debounce 5` → 5초 간격으로 변경 확인
+- [ ] SW0 버튼 인벤토리 토글
+
+---
+
+### 프로젝트 완성도
+
+| 기능 | 상태 |
+|------|------|
+| USB CDC → UART1 마이그레이션 | ✅ HW 검증 완료 |
+| USB PCD_Init 수정 | ✅ HW 검증 완료 |
+| E310 `e310 start` 태그 읽기 | ✅ HW 검증 완료 |
+| EEPROM RF Power 자동 적용 | ✅ 구현 완료 |
+| 안테나 체크 비활성화 | ✅ HW 검증 완료 |
+| 연속 인벤토리 | ✅ HW 검증 완료 |
+| 콘솔 출력 최적화 | ✅ 구현 완료 |
+| **Tag Inventory EPC 파싱** | ✅ **신규** (HW 테스트 대기) |
+| **EPC 중복 필터 (0x01)** | ✅ **신규** (HW 테스트 대기) |
+| **디바운스 기본값 1초** | ✅ **신규** |
+| USB HID 키보드 EPC 출력 | ⏳ EPC 파싱 완료, HW 테스트 대기 |
+
+---
+
+## Session 14: UART1 Freeze Fix Implementation (2026-02-20)
+
+### 문제
+`e310 start`로 연속 인벤토리 시작 시 UART1(콘솔/쉘) 완전히 프리즈 → TX, RX 모두 동작 불가 → 하드웨어 리셋 필요
+
+### Root Cause (5개 에이전트 분석 완료, 이전 세션)
+1. Shell 스레드에서 파서 실행 — `cmd_e310_start()`가 `wait_for_e310_response(3000)` 호출
+2. Deferred LOG에 스택 문자열 — `LOG_INF("EPC: %s", epc_str)` 메모리 손상
+3. ISR에서 무거운 작업 — `LOG_WRN()` + `frame_assembler_reset()`
+4. 스택 크기 부족 — MAIN=1024, SHELL=2048
+5. ISR-스레드 간 data race — `frame_assembler` 동기화 없음
+
+### 구현한 수정 사항
+
+| Fix | 내용 |
+|-----|------|
+| #1 | `cmd_e310_start/stop()`에서 `wait_for_e310_response()` 제거 → 즉시 리턴 |
+| #2 | `wait_for_e310_response()`에서 `uart_router_process()` 호출 제거 → 카운터 폴링만 |
+| #3 | `LOG_INF("EPC: %s")` → `LOG_INF("EPC #%u (len=%u, RSSI:%u)")` 정수만 사용 |
+| #4 | EPC hex dump는 `LOG_HEXDUMP_DBG`로 DBG 레벨에서만 출력 |
+| #5 | ISR에서 `LOG_WRN` + `frame_assembler_reset` 제거 → `atomic_t` 플래그로 대체 |
+| #6 | `CONFIG_MAIN_STACK_SIZE=2048`, `CONFIG_SHELL_STACK_SIZE=3072` |
+
+### 수정 파일
+- `src/uart_router.c` — 6개 수정 적용
+- `prj.conf` — 스택 크기 추가
+
+### 빌드 결과
+
+```
+FLASH: 140,292 B (13.38%)
+RAM:    38,536 B (11.76%)
+```
+
+변화: Flash -28B, RAM +2,048B (스택 증가)
+
+### HW 테스트 대기 항목
+- [ ] `e310 start` → UART1 프리즈 없이 연속 동작
+- [ ] `e310 start` 중 쉘 명령 입력 가능
+- [ ] EPC 읽기 → `EPC #N (len=M, RSSI:R)` 형식 출력
+- [ ] 장시간 (5분+) 연속 인벤토리 안정성
+- [ ] USB HID 키보드 EPC 출력
+
+---
+
+### Build Instructions
+
+```bash
+cd $HOME/work/zephyr_ws/zephyrproject
+source .venv/bin/activate
+west build -b nucleo_h723zg_parp01 apps/parp_01 -p auto
+west flash
+```
+
+---
+
+## Session 17: 자동 접속 수정 — Deferred Auto-Start (2026-02-20)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99
+- **Build Status**: ✅ SUCCESS (FLASH 141,280B 13.47%, RAM 39,112B 11.94%)
+
+---
+
+### Accomplishments
+
+#### 1. [CRITICAL] 부팅 시 자동 접속 실패 수정
+
+**증상**: 전원 ON 후 E310 자동 connect+inventory가 항상 TIMEOUT으로 실패. 콘솔에서 수동 `e310 start`는 정상.
+
+**근본 원인**: `wait_for_e310_response()`가 `router->stats.frames_parsed` 카운터 증가를 폴링으로 대기. 이 카운터는 `uart_router_process()` → `process_inventory_mode()`에서만 증가. 부팅 시 auto-start 코드는 main loop 진입 전에 호출되어 `uart_router_process()`가 실행되지 않음 → E310 응답이 ring buffer에 있지만 아무도 처리하지 않음 → 항상 TIMEOUT.
+
+**수정 내용** (`main.c`):
+- main loop 전의 blocking auto-start 코드 제거 (`k_msleep(2000)` + `uart_router_start_inventory()`)
+- main loop 안에서 deferred 실행: 부팅 후 2초 경과 시 1회 실행
+- `uart_router_process()`가 이미 실행 중이므로 `wait_for_e310_response()`가 정상 동작
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/main.c    # blocking auto-start → deferred auto-start in main loop
+```
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      141280 B         1 MB     13.47%
+             RAM:       39112 B       320 KB     11.94%
+```
+
+---
+
+### 남은 작업
+
+1. **HW 테스트**: 자동 접속 동작 확인
+2. **SW0 버튼 atomic 폴링**: `switch_control.h` 선언 + `main.c` 호출 미완
+3. **CDC ACM 셸 콘솔 이전**: 최종 목표 (현재 UART1)
+4. **데이터 전송 모드 선택**: HID 키보드 vs UART1 시리얼
+
+---
+
+## Session 18: RGB LED 550MHz 타이밍 수정 + LED 조건 간소화 + SW0 디바운스 (2026-02-20)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99
+- **Build Status**: ✅ SUCCESS (FLASH 140,836B 13.43%, RAM 39,112B 11.94%)
+
+---
+
+### Accomplishments
+
+#### 1. [CRITICAL] RGB LED DWT 타이밍 수정 — CPU 550MHz 기준으로 보정
+
+**증상**: NOP 루프 → DWT 사이클 카운터로 교체 후에도 RGB LED가 전혀 점등되지 않음.
+
+**근본 원인 발견**: DWT CYCCNT는 CPU 코어 클럭(550MHz)에서 동작하지만, 타이밍 상수를 AHB 버스 클럭(275MHz) 기준으로 계산함.
+
+DTS 클럭 구조:
+- SYSCLK = 550MHz
+- CPU core = SYSCLK / d1cpre(1) = **550MHz** ← DWT CYCCNT 기준
+- AHB (HCLK) = CPU / hpre(2) = 275MHz ← 이전에 잘못 사용한 값
+
+| 상수 | 이전 (275MHz 기준) | 실제 시간 | 수정 (550MHz 기준) | 실제 시간 |
+|------|-------------------|-----------|-------------------|-----------|
+| T0H | 83 cycles | 151ns ❌ | 165 cycles | 300ns ✓ |
+| T0L | 248 cycles | 451ns ❌ | 495 cycles | 900ns ✓ |
+| T1H | 165 cycles | 300ns ❌ | 330 cycles | 600ns ✓ |
+| T1L | 165 cycles | 300ns ❌ | 330 cycles | 600ns ✓ |
+
+모든 타이밍이 정확히 2배 빨라 SK6812가 데이터를 인식 불가했음.
+
+**HW 검증**: RED/BLUE 고정 정상 동작 확인 ✅
+
+---
+
+#### 2. RGB LED 조건 간소화 — 7개 LED 통합 동작
+
+이전: LED별 개별 역할 (LED0=하트비트, LED1=상태, LED2-6=태그)
+수정: 7개 LED 전체 동일 동작
+
+| 상태 | 색상 | 동작 |
+|------|------|------|
+| Inventory OFF | RED | 고정 |
+| Inventory ON | BLUE | 고정 |
+| 태그 읽음 | — | 순간 OFF (150ms) → base color 복귀 |
+| ERROR | RED | 200ms 간격 깜박임 |
+
+- heartbeat 제거
+- `rgb_led_set_error(bool active)` API 추가
+- `set_pattern()`, `set_pixel_color()`, `set_all_color()`, `diag` 명령 제거 (간소화)
+
+**HW 검증**: RED/BLUE 고정 ✅, 태그 깜박임 ✅
+
+---
+
+#### 3. 태그 읽음 깜박임 수정
+
+**문제**: Inventory ON=BLUE일 때 태그 읽음도 BLUE → BLUE라서 변화가 보이지 않음.
+**수정**: `rgb_led_notify_tag_read()`가 `rgb_led_clear()` (모두 OFF)하고 150ms 후 base color 복귀.
+
+---
+
+#### 4. SW0 디바운스 핀 재확인 제거
+
+**문제**: 50ms 후 `gpio_pin_get_dt()` 재확인 추가했더니 SW0가 전혀 동작하지 않음.
+**원인**: SW0가 GPIO_ACTIVE_LOW — 누를 때 LOW, 50ms 후에는 이미 손가락을 뗀 상태라 항상 reject.
+**수정**: 핀 재확인 로직 제거, 원래 방식(300ms 록아웃 + 즉시 토글) 복원.
+
+---
+
+### PG2 핀 SPI/PWM 불가 확인
+
+STM32H723ZG의 PG2 대체 기능:
+- `analog_pg2` (ADC)
+- `fmc_a12_pg2` (FMC)
+- `tim8_bkin_pg2` (TIM8 Break Input — 입력, PWM 출력 불가)
+
+SPI MOSI, TIM PWM 출력 모두 매핑 불가 → GPIO bit-bang이 유일한 선택.
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/rgb_led.c           # 550MHz 타이밍, LED 조건 간소화, 태그=OFF 깜박임
+├── src/rgb_led.h           # API 간소화 (set_error 추가, set_pattern/diag 등 제거)
+├── src/switch_control.c    # 핀 재확인 제거, 원래 디바운스 복원
+├── src/switch_control.h    # (minor)
+├── src/main.c              # deferred auto-start (USB HID ready 2초 대기)
+├── src/uart_router.c       # wait_for_e310_response 프레임 처리 추가
+├── src/uart_router.h       # (minor)
+├── src/usb_hid.c           # 대문자 Shift, 타이핑 속도
+├── src/usb_hid.h           # 속도 상수
+├── src/usb_device.c        # USB 초기화 순서
+├── src/e310_protocol.c     # EPC 파싱
+├── src/e310_protocol.h     # 상수
+├── src/e310_settings.c     # EEPROM 마이그레이션
+├── src/e310_settings.h     # RF_POWER=5
+├── prj.conf                # 스택 크기
+├── boards/.../nucleo_h723zg_parp01.dts  # USART1 콘솔
+└── docs/SESSION_NOTES.md   # 이 문서
+```
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      140836 B         1 MB     13.43%
+             RAM:       39112 B       320 KB     11.94%
+```
+
+---
+
+### 프로젝트 완성도
+
+| 기능 | 상태 |
+|------|------|
+| USB HID 키보드 | ✅ HW 검증 완료 |
+| E310 RFID 통신 | ✅ HW 검증 완료 |
+| 자동 접속 (부팅→connect→inventory) | ✅ HW 검증 완료 |
+| 연속 인벤토리 + EPC 파싱 | ✅ HW 검증 완료 |
+| HID 대문자 EPC 전송 | ✅ HW 검증 완료 |
+| **RGB LED (550MHz DWT)** | ✅ **HW 검증 완료** |
+| **RGB LED 간소화 조건** | ✅ **HW 검증 완료** |
+| SW0 인벤토리 토글 | ✅ HW 검증 완료 |
+| EEPROM 설정 저장 | ✅ 구현 완료 |
+| Shell 로그인 보안 | ✅ 구현 완료 (개발 모드 비활성화) |
