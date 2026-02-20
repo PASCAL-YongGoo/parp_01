@@ -33,6 +33,15 @@ static atomic_t diag_toggle_count;     /* toggle_handler actually ran */
 
 static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
 
+/* PD13 - Switch power supply (must output LOW for SW0/SW1 to work) */
+#define SW_PWR_NODE DT_ALIAS(sw_pwr)
+
+#if !DT_NODE_EXISTS(SW_PWR_NODE)
+#error "sw-pwr alias not found in device tree"
+#endif
+
+static const struct gpio_dt_spec sw_pwr = GPIO_DT_SPEC_GET(SW_PWR_NODE, gpios);
+
 /* State variables */
 static bool inventory_running = false;
 static inventory_toggle_cb_t toggle_callback;
@@ -87,13 +96,24 @@ int switch_control_init(void)
 {
 	int ret;
 
-	/* Check if GPIO is ready */
+	/* PD13 must output LOW before SW0/SW1 can detect falling edges */
+	if (!gpio_is_ready_dt(&sw_pwr)) {
+		LOG_ERR("SW_PWR (PD13) GPIO device not ready");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&sw_pwr, GPIO_OUTPUT_INACTIVE);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure SW_PWR (PD13): %d", ret);
+		return ret;
+	}
+	LOG_INF("SW_PWR (PD13) configured: output LOW");
+
 	if (!gpio_is_ready_dt(&sw0)) {
 		LOG_ERR("SW0 GPIO device not ready");
 		return -ENODEV;
 	}
 
-	/* Configure SW0 as input */
 	ret = gpio_pin_configure_dt(&sw0, GPIO_INPUT);
 	if (ret < 0) {
 		LOG_ERR("Failed to configure SW0 GPIO: %d", ret);

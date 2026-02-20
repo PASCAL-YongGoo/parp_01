@@ -3274,3 +3274,91 @@ Memory region         Used Size  Region Size  %age Used
 2. **CDC ACM으로 셸 콘솔 이전** — DTS/prj.conf/usb_device.c 변경
 3. **데이터 전송 모드 선택** — HID 키보드 vs UART1 시리얼
 4. **Shell 로그인 프로덕션 재활성화** — `#if 0` → `#if 1`
+
+---
+
+## Session 20: SW0 동작 불량 근본 원인 수정 — PD13 스위치 전원 핀 추가 (2026-02-20)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99
+- **Build Status**: ✅ SUCCESS (FLASH 142,012B 13.54%, RAM 39,112B 11.94%)
+
+---
+
+### 근본 원인
+
+SW0/SW1 스위치 회로가 다음과 같이 연결되어 있음:
+
+```
+PD13 (output) ──┬──[SW0]── PD10 (input, ACTIVE_LOW | PULL_UP)
+                └──[SW1]── PD11 (input, ACTIVE_LOW | PULL_UP)
+```
+
+- PD10/PD11은 내부 pull-up으로 평상시 HIGH
+- 스위치를 누르면 PD13의 전압이 PD10/PD11에 인가됨
+- PD13이 LOW를 출력해야 falling edge가 발생하여 스위치 눌림 감지
+- **PD13이 DTS에 정의되지 않아 floating 상태 → 스위치 동작 불안정**
+
+이것이 Session 19에서 분석한 "ISR 자체가 미발생" 문제의 근본 원인.
+
+---
+
+### 수정 내용
+
+#### 1. DTS: PD13 GPIO output 노드 추가
+
+`nucleo_h723zg_parp01.dts`의 `dio` 섹션에 `sw_pwr` 노드 추가:
+
+```dts
+sw_pwr: sw_pwr {
+    gpios = <&gpiod 13 GPIO_ACTIVE_HIGH>;
+    label = "SW_PWR";
+};
+```
+
+alias 등록: `sw-pwr = &sw_pwr;`
+
+#### 2. switch_control.c: PD13 초기화 코드 추가
+
+`switch_control_init()`에서 SW0 설정 전에 PD13을 `GPIO_OUTPUT_INACTIVE` (LOW)로 설정:
+
+```c
+static const struct gpio_dt_spec sw_pwr = GPIO_DT_SPEC_GET(SW_PWR_NODE, gpios);
+
+ret = gpio_pin_configure_dt(&sw_pwr, GPIO_OUTPUT_INACTIVE);
+```
+
+초기화 순서: PD13 output LOW → SW0 input → 콜백 등록 → 인터럽트 활성화
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── boards/arm/nucleo_h723zg_parp01/nucleo_h723zg_parp01.dts  # sw_pwr 노드 + alias
+├── src/switch_control.c                                       # PD13 초기화
+└── docs/SESSION_NOTES.md                                      # 이 문서
+```
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      142012 B         1 MB     13.54%
+             RAM:       39112 B       320 KB     11.94%
+```
+
+변화: Flash 141,760B → 142,012B (+252B, PD13 초기화 코드)
+
+---
+
+### 테스트 체크리스트 (하드웨어)
+
+- [ ] `sw0 reset` → SW0 누름 → `sw0 diag` → ISR count 증가 확인
+- [ ] SW0 토글로 인벤토리 ON/OFF 안정 동작
+- [ ] 연속 누름 시 디바운스 정상 (300ms 록아웃)
+- [ ] SW1 (PD11) 하드웨어 동작 확인 (향후 기능 추가 시)

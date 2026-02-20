@@ -73,6 +73,12 @@
 			gpios = <&gpiog 2 GPIO_ACTIVE_HIGH>;
 			label = "RGB_LED_SIG";
 		};
+
+		/* PD13 - Switch power supply (must output LOW for SW0/SW1) */
+		sw_pwr: sw_pwr {
+			gpios = <&gpiod 13 GPIO_ACTIVE_HIGH>;
+			label = "SW_PWR";
+		};
 	};
 
 	aliases {
@@ -85,6 +91,7 @@
 		beep-out = &beep_out;
 		rgb-led = &rgb_led_sig;
 		e310-beep = &e310_beep;
+		sw-pwr = &sw_pwr;
 	};
 };
 
