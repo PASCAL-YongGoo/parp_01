@@ -13,11 +13,13 @@
 #include "uart_router.h"
 #include "usb_hid.h"
 #include "beep_control.h"
+#include "rgb_led.h"
 #include "switch_control.h"
 #include "e310_settings.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/atomic.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -34,32 +36,15 @@ static uart_router_t *g_router_instance;
 /* Re-entrance guard for uart_router_process() */
 static atomic_t process_lock = ATOMIC_INIT(0);
 
+/* ISR overrun flag — set in ISR, handled in thread context */
+static atomic_t uart4_rx_overrun = ATOMIC_INIT(0);
+
 /* Forward declarations */
 static void frame_assembler_reset(frame_assembler_t *fa);
 
 /* ========================================================================
  * Phase 1.1: Safe Ring Buffer Reset Helper
  * ======================================================================== */
-
-/**
- * @brief Safely reset UART4 ring buffers with ISR protection
- *
- * Disables UART interrupts before resetting to prevent race conditions
- * between ISR and main loop.
- */
-static void safe_ring_buf_reset_all(uart_router_t *router)
-{
-	/* Disable UART4 interrupts */
-	uart_irq_rx_disable(router->uart4);
-	uart_irq_tx_disable(router->uart4);
-
-	ring_buf_reset(&router->uart4_rx_ring);
-	ring_buf_reset(&router->uart4_tx_ring);
-
-	/* Re-enable RX interrupt */
-	uart_irq_rx_enable(router->uart4);
-	/* TX is enabled only when there's data to send */
-}
 
 /**
  * @brief Safely reset UART4 RX buffer and frame assembler with ISR protection
@@ -104,43 +89,70 @@ static void epc_filter_set_debounce(epc_filter_t *filter, uint32_t debounce_sec)
 	LOG_INF("EPC debounce set to %u seconds", debounce_sec);
 }
 
-/**
- * @brief Check if EPC should be sent (duplicate filtering)
- *
- * @param filter EPC filter context
- * @param epc EPC data
- * @param epc_len EPC length
- * @return true if EPC should be sent (new or debounce expired)
- *         false if EPC is duplicate within debounce time
- */
-static bool epc_filter_check(epc_filter_t *filter, const uint8_t *epc, uint8_t epc_len)
+static void epc_filter_print_summary(epc_filter_t *filter)
+{
+	if (filter->count == 0) {
+		return;
+	}
+
+	printk("--- %u tag(s) ---\n", filter->count);
+
+	for (uint8_t i = 0; i < filter->count; i++) {
+		epc_cache_entry_t *e = &filter->entries[i];
+		if (e->epc_len == 0) {
+			continue;
+		}
+		char line[128];
+		int pos = snprintf(line, sizeof(line), "#%u ", i + 1);
+		for (uint8_t j = 0; j < e->epc_len && pos < (int)sizeof(line) - 4; j++) {
+			pos += snprintf(&line[pos], sizeof(line) - pos, "%02X", e->epc[j]);
+			if (j % 2 == 1 && j < e->epc_len - 1) {
+				line[pos++] = ' ';
+			}
+		}
+		snprintf(&line[pos], sizeof(line) - pos,
+			 "  RSSI:%u/%u  x%u\n", e->rssi_max, e->rssi_min,
+			 e->read_count);
+		printk("%s", line);
+	}
+}
+
+static bool epc_filter_check(epc_filter_t *filter, const uint8_t *epc,
+                             uint8_t epc_len, uint8_t rssi)
 {
 	int64_t now = k_uptime_get();
 
-	/* Search for existing EPC in cache */
 	for (uint8_t i = 0; i < filter->count; i++) {
 		epc_cache_entry_t *entry = &filter->entries[i];
 
 		if (entry->epc_len == epc_len &&
 		    memcmp(entry->epc, epc, epc_len) == 0) {
-			/* Found matching EPC */
-			if ((now - entry->timestamp) < filter->debounce_ms) {
-				/* Within debounce time - block */
+			entry->read_count++;
+			entry->last_seen = now;
+			if (rssi > entry->rssi_max) {
+				entry->rssi_max = rssi;
+			}
+			if (rssi < entry->rssi_min) {
+				entry->rssi_min = rssi;
+			}
+
+			if ((now - entry->last_sent) < filter->debounce_ms) {
 				return false;
 			}
-			/* Debounce expired - update timestamp and allow */
-			entry->timestamp = now;
+			entry->last_sent = now;
 			return true;
 		}
 	}
 
-	/* New EPC - add to cache */
 	epc_cache_entry_t *entry = &filter->entries[filter->next_idx];
 	memcpy(entry->epc, epc, epc_len);
 	entry->epc_len = epc_len;
-	entry->timestamp = now;
+	entry->last_sent = now;
+	entry->last_seen = now;
+	entry->rssi_max = rssi;
+	entry->rssi_min = rssi;
+	entry->read_count = 1;
 
-	/* Update cache indices */
 	filter->next_idx = (filter->next_idx + 1) % EPC_CACHE_SIZE;
 	if (filter->count < EPC_CACHE_SIZE) {
 		filter->count++;
@@ -279,16 +291,12 @@ static void uart4_callback(const struct device *dev, void *user_data)
 		int len = uart_fifo_read(dev, buf, sizeof(buf));
 
 		if (len > 0) {
-			/* Put data into ring buffer */
 			int put = ring_buf_put(&router->uart4_rx_ring, buf, len);
 			router->stats.uart4_rx_bytes += put;
 
-			/* Phase 2.2: Reset frame assembler on overrun */
 			if (put < len) {
 				router->stats.rx_overruns++;
-				LOG_WRN("UART4 RX overrun: lost %d bytes, resetting assembler",
-				        len - put);
-				frame_assembler_reset(&router->e310_frame);
+				atomic_set(&uart4_rx_overrun, 1);
 			}
 		}
 	}
@@ -346,6 +354,7 @@ int uart_router_init(uart_router_t *router)
 	router->mode = ROUTER_MODE_IDLE;
 	router->inventory_active = false;
 	router->uart4_ready = true;
+	router->inventory_interval_ms = INVENTORY_INTERVAL_DEFAULT_MS;
 
 	g_router_instance = router;
 
@@ -408,11 +417,7 @@ int uart_router_set_mode(uart_router_t *router, router_mode_t mode)
 		        uart_router_get_mode_name(old_mode),
 		        uart_router_get_mode_name(mode));
 
-		/* Phase 1.1: Safely reset all ring buffers */
-		safe_ring_buf_reset_all(router);
-
-		/* Reset frame assembler on mode change */
-		frame_assembler_reset(&router->e310_frame);
+		safe_uart4_rx_reset(router);
 	}
 
 	return 0;
@@ -439,11 +444,13 @@ bool e310_is_debug_mode(void);
 static void process_e310_frame(uart_router_t *router,
                                 const uint8_t *frame, size_t len)
 {
-	printk("RX[%zu]: ", len);
-	for (size_t i = 0; i < len; i++) {
-		printk("%02X ", frame[i]);
+	if (!router->inventory_active || e310_is_debug_mode()) {
+		printk("RX[%zu]: ", len);
+		for (size_t i = 0; i < len; i++) {
+			printk("%02X ", frame[i]);
+		}
+		printk("\n");
 	}
-	printk("\n");
 
 	/* Parse E310 protocol frame */
 	e310_response_header_t header;
@@ -455,8 +462,7 @@ static void process_e310_frame(uart_router_t *router,
 		return;
 	}
 
-	/* Debug mode: print parsed header */
-	if (e310_is_debug_mode()) {
+	if (e310_is_debug_mode() && !router->inventory_active) {
 		printk("  -> Len=%u Addr=0x%02X Cmd=0x%02X Status=0x%02X (%s)\n",
 		       header.len, header.addr, header.recmd, header.status,
 		       e310_get_status_desc(header.status));
@@ -468,34 +474,26 @@ static void process_e310_frame(uart_router_t *router,
 		ret = e310_parse_auto_upload_tag(&frame[4], len - 6, &tag);
 
 		if (ret >= 0) {
-			/* Phase 3.4: Check format result */
-			char epc_str[128];
-			int fmt_ret = e310_format_epc_string(tag.epc, tag.epc_len,
-			                                     epc_str, sizeof(epc_str));
-			if (fmt_ret < 0) {
-				LOG_ERR("Failed to format EPC: %d", fmt_ret);
-				router->stats.parse_errors++;
-				return;
+			/* Format EPC as hex string without spaces for HID */
+			char epc_str[64];
+			int pos = 0;
+			for (uint8_t b = 0; b < tag.epc_len && pos + 2 < (int)sizeof(epc_str); b++) {
+				pos += snprintf(&epc_str[pos], sizeof(epc_str) - pos,
+				                "%02X", tag.epc[b]);
 			}
+			epc_str[pos] = '\0';
 
-			/* EPC duplicate filtering */
-			if (epc_filter_check(&router->epc_filter, tag.epc, tag.epc_len)) {
-				/* New EPC or debounce expired -> send via HID */
+			if (epc_filter_check(&router->epc_filter, tag.epc,
+				                     tag.epc_len, tag.rssi)) {
 				int hid_ret = usb_hid_send_epc((const uint8_t *)epc_str,
 				                               strlen(epc_str));
 				if (hid_ret >= 0) {
 					router->stats.epc_sent++;
-					LOG_INF("EPC #%u: %s (RSSI: %u)",
-					        router->stats.epc_sent, epc_str, tag.rssi);
-					/* Trigger beeper on successful EPC send */
 					beep_control_trigger();
+					rgb_led_notify_tag_read();
 				} else if (hid_ret != 0) {
-					/* hid_ret == 0 means muted, don't log as warning */
 					LOG_WRN("HID send failed: %d", hid_ret);
 				}
-			} else {
-				/* Duplicate EPC within debounce time -> ignore */
-				LOG_DBG("Duplicate EPC ignored: %s", epc_str);
 			}
 
 			router->stats.frames_parsed++;
@@ -504,34 +502,112 @@ static void process_e310_frame(uart_router_t *router,
 			router->stats.parse_errors++;
 		}
 	} else if (header.recmd == E310_CMD_TAG_INVENTORY) {
-		/* Tag Inventory (0x01) response */
 		router->stats.frames_parsed++;
+		bool inventory_round_done = false;
 
-		if (header.status == E310_STATUS_SUCCESS) {
-			/* Parse tag inventory response - data starts at offset 4 */
-			size_t data_len = len - 6; /* Exclude Len, Addr, Cmd, Status, CRC */
+		if (header.status == E310_STATUS_SUCCESS ||
+		    header.status == E310_STATUS_MORE_DATA) {
+			size_t data_len = len - 6;
 			if (data_len >= 2) {
-				/* Format: [Tag Count][RSSI][PC][EPC...] or similar */
-				uint8_t tag_count = frame[4];
-				printk("Tag Inventory: %u tag(s) found\n", tag_count);
+				uint8_t antenna = frame[4];
+				uint8_t tag_count = frame[5];
+				LOG_DBG("Tag Inventory: ant=%u, %u tag(s), %zu data bytes",
+				        antenna, tag_count, data_len);
 
-				/* If tags present, try to parse EPC */
-				if (tag_count > 0 && data_len > 3) {
-					/* Simplified: print raw tag data for now */
-					printk("  Data: ");
-					for (size_t i = 4; i < len - 2; i++) {
-						printk("%02X ", frame[i]);
+				const uint8_t *block_ptr = &frame[6];
+				size_t remaining = data_len - 2;
+
+			for (uint8_t i = 0; i < tag_count && remaining > 0; i++) {
+				if (e310_is_debug_mode()) {
+					printk("  RAW[%u/%u] %zu bytes:", i + 1,
+					       tag_count, remaining);
+					for (size_t d = 0;
+					     d < remaining && d < 64; d++) {
+						printk(" %02X", block_ptr[d]);
 					}
 					printk("\n");
 				}
+
+				e310_tag_data_t tag;
+				int consumed = e310_parse_tag_data(
+					block_ptr, remaining, &tag);
+				if (consumed <= 0) {
+					LOG_WRN("Tag Inventory: parse error %d at tag %u",
+					        consumed, i);
+					break;
+				}
+
+				tag.antenna = antenna;
+
+				uint8_t *epc_data = tag.epc;
+				uint8_t epc_len = tag.epc_len;
+
+				if (e310_is_debug_mode()) {
+					printk("  PARSED[%u]: epc_len=%u"
+					       " has_tid=%d rssi=%u\n",
+					       i + 1, epc_len,
+					       tag.has_tid, tag.rssi);
+					printk("    EPC:");
+					for (uint8_t b = 0; b < epc_len; b++) {
+						printk(" %02X", epc_data[b]);
+					}
+					printk("\n");
+				}
+
+				char epc_str[64];
+				int epc_pos = 0;
+				for (uint8_t b = 0; b < epc_len &&
+				     epc_pos + 2 < (int)sizeof(epc_str); b++) {
+					epc_pos += snprintf(&epc_str[epc_pos],
+					                    sizeof(epc_str) - epc_pos,
+					                    "%02X", epc_data[b]);
+				}
+				epc_str[epc_pos] = '\0';
+
+				if (epc_filter_check(&router->epc_filter,
+					             epc_data, epc_len, tag.rssi)) {
+					int hid_ret = usb_hid_send_epc(
+						(const uint8_t *)epc_str,
+						strlen(epc_str));
+					if (hid_ret >= 0) {
+						router->stats.epc_sent++;
+						beep_control_trigger();
+						rgb_led_notify_tag_read();
+					} else if (hid_ret != 0) {
+						LOG_WRN("HID send failed: %d",
+						        hid_ret);
+					}
+				}
+
+					block_ptr += consumed;
+					remaining -= consumed;
+				}
+			}
+			if (header.status == E310_STATUS_SUCCESS) {
+				inventory_round_done = true;
 			}
 		} else if (header.status == E310_STATUS_OPERATION_COMPLETE) {
-			printk("Tag Inventory complete (no more tags)\n");
+			inventory_round_done = true;
 		} else if (header.status == E310_STATUS_INVENTORY_TIMEOUT) {
-			printk("Tag Inventory: No tags found (timeout)\n");
+			inventory_round_done = true;
 		} else {
-			printk("Tag Inventory: Status 0x%02X (%s)\n",
-			       header.status, e310_get_status_desc(header.status));
+			LOG_WRN("Tag Inventory: 0x%02X (%s)",
+			        header.status, e310_get_status_desc(header.status));
+			inventory_round_done = true;
+		}
+
+		if (inventory_round_done && router->inventory_active) {
+			router->inventory_active = false;
+
+			if (router->inventory_interval_ms > 0) {
+				router->next_inventory_time =
+					k_uptime_get() +
+					router->inventory_interval_ms;
+			} else {
+				epc_filter_print_summary(&router->epc_filter);
+				switch_control_set_inventory_state(false);
+				LOG_INF("Inventory round complete (single-shot)");
+			}
 		}
 	} else if (header.recmd == E310_CMD_OBTAIN_READER_INFO) {
 		router->stats.frames_parsed++;
@@ -635,10 +711,11 @@ static void process_inventory_mode(uart_router_t *router)
 	uint8_t buf[128];
 	int len;
 
-	/* CDC input is now handled by Shell backend directly */
-	/* No longer discarding - allows shell commands during inventory */
+	if (atomic_cas(&uart4_rx_overrun, 1, 0)) {
+		LOG_WRN("UART4 RX overrun (lost bytes), resetting assembler");
+		frame_assembler_reset(&router->e310_frame);
+	}
 
-	/* Get UART4 data (E310 responses) */
 	len = ring_buf_get(&router->uart4_rx_ring, buf, sizeof(buf));
 	if (len <= 0) {
 		return;
@@ -662,33 +739,45 @@ static void process_inventory_mode(uart_router_t *router)
 			                         &router->e310_frame, &frame_len);
 
 			if (frame && frame_len > 0) {
-				/* Verify CRC before processing */
 				int ret = e310_verify_crc(frame, frame_len);
 				if (ret == E310_OK) {
 					process_e310_frame(router, frame, frame_len);
-				} else {
-					/* Phase 3.1: Dump bad frame for debugging */
-					LOG_WRN("Frame CRC error (len=%zu)", frame_len);
-					/* Print frame bytes for debugging */
-					printk("RX[%zu]: ", frame_len);
-					for (size_t i = 0; i < frame_len; i++) {
-						printk("%02X ", frame[i]);
-					}
-					printk("\n");
-					/* Show CRC comparison */
-					if (frame_len >= 3) {
-						uint16_t calc_crc = e310_crc16(frame, frame_len - 2);
-						uint16_t frame_crc = frame[frame_len - 2] | (frame[frame_len - 1] << 8);
-						printk("CRC calc=%04X frame=%04X\n", calc_crc, frame_crc);
-					}
-					router->stats.parse_errors++;
+					frame_assembler_reset(&router->e310_frame);
+			} else {
+				LOG_WRN("Frame CRC error (len=%zu)", frame_len);
+				printk("RX[%zu]: ", frame_len);
+				for (size_t i = 0; i < frame_len; i++) {
+					printk("%02X ", frame[i]);
 				}
+				printk("\n");
+				if (frame_len >= 3) {
+					uint16_t calc_crc = e310_crc16(frame, frame_len - 2);
+					uint16_t frame_crc = frame[frame_len - 2] | (frame[frame_len - 1] << 8);
+					printk("CRC calc=%04X frame=%04X\n", calc_crc, frame_crc);
+				}
+				router->stats.parse_errors++;
+				safe_uart4_rx_reset(router);
+				return;
 			}
-
-			/* Reset for next frame */
-			frame_assembler_reset(&router->e310_frame);
+			} else {
+				frame_assembler_reset(&router->e310_frame);
+			}
 		}
 	}
+}
+
+static int send_inventory_command(uart_router_t *router)
+{
+	safe_uart4_rx_reset(router);
+
+	/* 연속 모드: ScanTime=10 (1초), 단발: ScanTime=50 (5초) */
+	uint8_t scan_time = (router->inventory_interval_ms > 0) ? 10 : 50;
+	int len = e310_build_tag_inventory_scan_time(&router->e310_ctx,
+						     scan_time);
+	if (len < 0) {
+		return len;
+	}
+	return uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
 }
 
 void uart_router_process(uart_router_t *router)
@@ -707,6 +796,19 @@ void uart_router_process(uart_router_t *router)
 	}
 
 	process_inventory_mode(router);
+
+	if (router->inventory_interval_ms > 0 &&
+	    router->next_inventory_time > 0 &&
+	    router->mode == ROUTER_MODE_INVENTORY &&
+	    k_uptime_get() >= router->next_inventory_time) {
+		router->inventory_active = true;
+		if (send_inventory_command(router) < 0) {
+			router->inventory_active = false;
+		}
+		router->next_inventory_time =
+			k_uptime_get() +
+			router->inventory_interval_ms;
+	}
 
 	atomic_set(&process_lock, 0);
 }
@@ -744,11 +846,13 @@ int uart_router_send_uart4(uart_router_t *router, const uint8_t *data, size_t le
 		return -ENODEV;
 	}
 
-	printk("TX[%zu]: ", len);
-	for (size_t i = 0; i < len; i++) {
-		printk("%02X ", data[i]);
+	if (!router->inventory_active) {
+		printk("TX[%zu]: ", len);
+		for (size_t i = 0; i < len; i++) {
+			printk("%02X ", data[i]);
+		}
+		printk("\n");
 	}
-	printk("\n");
 
 	/* Queue data in TX ring buffer */
 	int put = ring_buf_put(&router->uart4_tx_ring, data, len);
@@ -770,13 +874,11 @@ int uart_router_send_uart4(uart_router_t *router, const uint8_t *data, size_t le
  * ======================================================================== */
 
 /**
- * @brief Wait for E310 response with timeout
+ * @brief Wait for E310 response with timeout (poll-only, no processing)
  *
- * Polls uart_router_process() to handle incoming data while waiting.
- *
- * @param router Router context
- * @param timeout_ms Timeout in milliseconds
- * @return 0 on success (response received), negative on timeout
+ * Sleeps and polls frame counters. Actual UART processing is done by
+ * main loop's uart_router_process() — this function MUST NOT call it
+ * to avoid driving the parser from the shell thread context.
  */
 static int wait_for_e310_response(uart_router_t *router, int timeout_ms)
 {
@@ -785,13 +887,14 @@ static int wait_for_e310_response(uart_router_t *router, int timeout_ms)
 	uint32_t initial_errors = router->stats.parse_errors;
 
 	while ((k_uptime_get() - start) < timeout_ms) {
-		/* Process incoming UART data */
-		uart_router_process(router);
+		if (atomic_cas(&process_lock, 0, 1)) {
+			process_inventory_mode(router);
+			atomic_set(&process_lock, 0);
+		}
 
-		/* Check if we got a frame (success or error) */
 		if (router->stats.frames_parsed > initial_frames ||
 		    router->stats.parse_errors > initial_errors) {
-			return 0; /* Got a response */
+			return 0;
 		}
 
 		k_msleep(10);
@@ -873,6 +976,28 @@ int uart_router_connect_e310(uart_router_t *router)
 	if (responses_ok > 0) {
 		router->e310_connected = true;
 		LOG_INF("E310 connected (%d/%d responses OK)", responses_ok, 3);
+
+		len = e310_build_enable_antenna_check(&router->e310_ctx, false);
+		if (len > 0) {
+			ret = uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
+			if (ret > 0 && wait_for_e310_response(router, 200) == 0) {
+				LOG_INF("Antenna check disabled");
+			} else {
+				LOG_WRN("Failed to disable antenna check");
+			}
+		}
+
+		uint8_t saved_power = e310_settings_get_rf_power();
+		len = e310_build_modify_rf_power(&router->e310_ctx, saved_power);
+		if (len > 0) {
+			ret = uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
+			if (ret > 0 && wait_for_e310_response(router, 200) == 0) {
+				LOG_INF("RF power applied: %u dBm", saved_power);
+			} else {
+				LOG_WRN("Failed to apply RF power");
+			}
+		}
+
 		return 0;
 	}
 
@@ -898,7 +1023,10 @@ int uart_router_start_inventory(uart_router_t *router)
 		router->e310_connected = true;
 	}
 
-	safe_uart4_rx_reset(router);
+	/* Set mode to INVENTORY first — uart_router_set_mode() resets ring buffers
+	 * on mode change, so we must do this BEFORE queuing the TX command.
+	 * Otherwise the TX ring buffer gets wiped and E310 never receives the command. */
+	uart_router_set_mode(router, ROUTER_MODE_INVENTORY);
 
 	/* Clear EPC cache for new inventory session */
 	epc_filter_clear(&router->epc_filter);
@@ -906,6 +1034,7 @@ int uart_router_start_inventory(uart_router_t *router)
 	int len = e310_build_tag_inventory_default(&router->e310_ctx);
 	if (len < 0) {
 		LOG_ERR("Failed to build start inventory command: %d", len);
+		uart_router_set_mode(router, ROUTER_MODE_IDLE);
 		return len;
 	}
 
@@ -913,15 +1042,17 @@ int uart_router_start_inventory(uart_router_t *router)
 	int ret = uart_router_send_uart4(router, router->e310_ctx.tx_buffer, len);
 	if (ret < 0) {
 		LOG_ERR("Failed to send start inventory command: %d", ret);
+		uart_router_set_mode(router, ROUTER_MODE_IDLE);
 		return ret;
 	}
 
-	/* Set mode to INVENTORY */
-	uart_router_set_mode(router, ROUTER_MODE_INVENTORY);
 	router->inventory_active = true;
 	switch_control_set_inventory_state(true);
+	usb_hid_set_enabled(true);
+	rgb_led_set_inventory_status(true);
 
-	LOG_INF("E310 Tag Inventory started");
+	LOG_INF("E310 Tag Inventory started (interval %u ms, HID=ON)",
+	        router->inventory_interval_ms);
 	return 0;
 }
 
@@ -931,6 +1062,14 @@ int uart_router_stop_inventory(uart_router_t *router)
 		LOG_ERR("UART4 not ready");
 		return -ENODEV;
 	}
+
+	router->inventory_active = false;
+	router->next_inventory_time = 0;
+	switch_control_set_inventory_state(false);
+	usb_hid_set_enabled(false);
+	rgb_led_set_inventory_status(false);
+
+	epc_filter_print_summary(&router->epc_filter);
 
 	int len = e310_build_stop_immediately(&router->e310_ctx);
 	if (len < 0) {
@@ -944,12 +1083,7 @@ int uart_router_stop_inventory(uart_router_t *router)
 		return ret;
 	}
 
-	router->inventory_active = false;
-	switch_control_set_inventory_state(false);
-
-	uart_router_set_mode(router, ROUTER_MODE_IDLE);
-
-	LOG_INF("E310 Tag Inventory stopped");
+	LOG_INF("E310 Tag Inventory stopped (HID=OFF)");
 	return 0;
 }
 
@@ -1059,7 +1193,7 @@ static int cmd_router_stats(const struct shell *sh, size_t argc, char **argv)
 	uart_router_get_stats(g_router_instance, &stats);
 
 	shell_print(sh, "=== UART Router Statistics ===");
-	shell_print(sh, "CDC ACM (UART1):");
+	shell_print(sh, "USART1 (Console):");
 	shell_print(sh, "  RX: %u bytes", stats.uart1_rx_bytes);
 	shell_print(sh, "  TX: %u bytes", stats.uart1_tx_bytes);
 	shell_print(sh, "UART4 (E310):");
@@ -1158,7 +1292,10 @@ static int cmd_e310_start(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	wait_for_e310_response(g_router_instance, 500);
+	/* Return immediately — main loop handles all E310 response processing.
+	 * Previously called wait_for_e310_response(3000) here, which blocked
+	 * the shell thread and called uart_router_process() from shell context,
+	 * causing UART1 freeze due to shell thread starvation. */
 	shell_print(sh, "E310 Tag Inventory started");
 	return 0;
 }
@@ -1179,7 +1316,7 @@ static int cmd_e310_stop(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	wait_for_e310_response(g_router_instance, 500);
+	uart_router_set_mode(g_router_instance, ROUTER_MODE_IDLE);
 	shell_print(sh, "E310 Tag Inventory stopped");
 	return 0;
 }
@@ -1480,6 +1617,10 @@ static int cmd_e310_reset(const struct shell *sh, size_t argc, char **argv)
 	wait_for_e310_response(g_router_instance, 500);
 
 	g_router_instance->inventory_active = false;
+	g_router_instance->next_inventory_time = 0;
+	switch_control_set_inventory_state(false);
+	usb_hid_set_enabled(false);
+	rgb_led_set_inventory_status(false);
 	uart_router_set_mode(g_router_instance, ROUTER_MODE_IDLE);
 
 	shell_print(sh, "E310 stop command sent, router reset to IDLE");
@@ -1871,6 +2012,26 @@ static int cmd_e310_invtime(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_e310_interval(const struct shell *sh, size_t argc, char **argv)
+{
+	if (!g_router_instance) {
+		shell_error(sh, "Router not initialized");
+		return -ENODEV;
+	}
+
+	if (argc < 2) {
+		shell_print(sh, "Current interval: %u ms",
+			    g_router_instance->inventory_interval_ms);
+		shell_print(sh, "Usage: e310 interval <ms>");
+		return 0;
+	}
+
+	uint32_t ms = atoi(argv[1]);
+	g_router_instance->inventory_interval_ms = ms;
+	shell_print(sh, "Inventory interval set to %u ms", ms);
+	return 0;
+}
+
 static int cmd_e310_gpio(const struct shell *sh, size_t argc, char **argv)
 {
 	if (!g_router_instance) {
@@ -1956,6 +2117,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_e310,
 	SHELL_CMD(power, NULL, "Set RF power (0-30 dBm)", cmd_e310_power),
 	SHELL_CMD(freq, NULL, "Set frequency region/range", cmd_e310_freq),
 	SHELL_CMD(invtime, NULL, "Set inventory time", cmd_e310_invtime),
+	SHELL_CMD(interval, NULL, "Set inventory interval (ms)", cmd_e310_interval),
 	SHELL_CMD(antenna, NULL, "Set antenna configuration", cmd_e310_antenna),
 	SHELL_CMD(buzzer, NULL, "Buzzer control", cmd_e310_buzzer),
 	SHELL_CMD(led, NULL, "LED control", cmd_e310_led),

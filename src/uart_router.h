@@ -40,7 +40,10 @@ extern "C" {
 #define EPC_CACHE_SIZE              32
 
 /** Default EPC debounce time in seconds */
-#define EPC_DEBOUNCE_DEFAULT_SEC    3
+#define EPC_DEBOUNCE_DEFAULT_SEC    1
+
+/** Default inventory repeat interval (ms) */
+#define INVENTORY_INTERVAL_DEFAULT_MS  500
 
 /* ========================================================================
  * EPC Filter (for duplicate detection)
@@ -52,7 +55,11 @@ extern "C" {
 typedef struct {
 	uint8_t epc[E310_MAX_EPC_LENGTH]; /**< EPC data */
 	uint8_t epc_len;                   /**< EPC length */
-	int64_t timestamp;                 /**< Last sent timestamp (ms) */
+	int64_t last_sent;                 /**< Last HID send timestamp (debounce) */
+	int64_t last_seen;                 /**< Last read timestamp */
+	uint8_t rssi_max;                  /**< Best RSSI observed */
+	uint8_t rssi_min;                  /**< Worst RSSI observed */
+	uint32_t read_count;               /**< Total read count */
 } epc_cache_entry_t;
 
 /**
@@ -112,8 +119,8 @@ typedef enum {
  * @brief UART Router statistics
  */
 typedef struct {
-	uint32_t uart1_rx_bytes;    /**< Bytes received from CDC ACM/UART1 */
-	uint32_t uart1_tx_bytes;    /**< Bytes sent to CDC ACM/UART1 */
+	uint32_t uart1_rx_bytes;    /**< Bytes received from USART1 (console) */
+	uint32_t uart1_tx_bytes;    /**< Bytes sent to USART1 (console) */
 	uint32_t uart4_rx_bytes;    /**< Bytes received from UART4 */
 	uint32_t uart4_tx_bytes;    /**< Bytes sent to UART4 */
 	uint32_t rx_overruns;       /**< RX buffer overrun count */
@@ -155,6 +162,10 @@ typedef struct {
 	bool uart4_ready;            /**< UART4 device is ready */
 	bool inventory_active;       /**< E310 inventory is running */
 	bool e310_connected;         /**< E310 connection sequence completed */
+
+	/* Periodic inventory timing */
+	int64_t next_inventory_time; /**< k_uptime for next inventory command */
+	uint32_t inventory_interval_ms; /**< ms between inventory rounds (0=continuous) */
 
 } uart_router_t;
 
