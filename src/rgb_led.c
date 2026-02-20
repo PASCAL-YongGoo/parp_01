@@ -1,16 +1,9 @@
 /**
  * @file rgb_led.c
- * @brief SK6812 RGB LED Control Implementation
+ * @brief SK6812 RGB LED — bit-bang with DWT cycle counter
  *
- * Bit-banging implementation for SK6812 RGB LEDs.
- * STM32H723 at 275MHz, timing via NOP delays.
- *
- * SK6812 Protocol (800kHz):
- *   T0H: 0.3us (83 cycles @ 275MHz)
- *   T0L: 0.9us (248 cycles @ 275MHz)
- *   T1H: 0.6us (165 cycles @ 275MHz)
- *   T1L: 0.6us (165 cycles @ 275MHz)
- *   Reset: >80us
+ * CPU core = 550MHz (SYSCLK/d1cpre), DWT CYCCNT counts at core clock.
+ * SK6812 800kHz: T0H=165, T0L=495, T1H=330, T1L=330 cycles @550MHz.
  *
  * @copyright Copyright (c) 2026 PARP
  */
@@ -26,7 +19,6 @@
 
 LOG_MODULE_REGISTER(rgb_led, LOG_LEVEL_INF);
 
-/* Device tree reference */
 #define RGB_LED_NODE DT_ALIAS(rgb_led)
 
 #if !DT_NODE_EXISTS(RGB_LED_NODE)
@@ -35,65 +27,76 @@ LOG_MODULE_REGISTER(rgb_led, LOG_LEVEL_INF);
 
 static const struct gpio_dt_spec rgb_led_pin = GPIO_DT_SPEC_GET(RGB_LED_NODE, gpios);
 
-/* Color buffer (GRB order for SK6812) */
 static uint8_t led_buffer[RGB_LED_COUNT * 3];
-
-/* Brightness scaling (0-100%) */
 static uint8_t brightness_percent = 100;
-
-/* Initialization flag - volatile for ISR/main thread synchronization */
 static volatile bool initialized;
 
-/* Direct GPIO register access for timing-critical bit-banging */
+/* Unified LED state machine */
+static volatile bool led_dirty;
+static bool inventory_running;
+static bool tag_blink_active;
+static int64_t tag_blink_start;
+static bool error_active;
+static bool error_on;
+static int64_t error_last;
+
+#define TAG_BLINK_DURATION_MS  150
+#define ERROR_BLINK_INTERVAL_MS 200
+#define LED_BRIGHTNESS 64
+
+/* Direct GPIO register access */
 static volatile uint32_t *gpio_bsrr;
 static uint32_t gpio_set_mask;
 static uint32_t gpio_reset_mask;
 
-/**
- * @brief Inline delay using NOP instructions
+/* DWT cycle counter (ARM Cortex-M debug hardware) */
+#define DWT_CTRL_REG    (*(volatile uint32_t *)0xE0001000)
+#define DWT_CYCCNT_REG  (*(volatile uint32_t *)0xE0001004)
+#define DEMCR_REG       (*(volatile uint32_t *)0xE000EDFC)
+#define DWT_CTRL_CYCCNTENA  BIT(0)
+#define DEMCR_TRCENA        BIT(24)
+
+/*
+ * SK6812 timing @ 550 MHz CPU core (1 cycle = 1.818 ns):
+ *   T0H: 300ns = 165 cycles    T0L: 900ns = 495 cycles
+ *   T1H: 600ns = 330 cycles    T1L: 600ns = 330 cycles
  *
- * At 275MHz, 1 cycle = ~3.6ns
- * Approximate cycle counts for SK6812 timing.
- *
- * NOTE: Timing may vary due to Cortex-M7 pipeline and cache effects.
- * Verify with oscilloscope if LED behavior is unstable.
- * For more precise timing, consider using DWT cycle counter or
- * hardware timer/DMA-based implementation.
+ * Previous bug: calculated at 275MHz (AHB), but DWT runs at 550MHz (core).
  */
-static inline void delay_cycles(uint32_t cycles)
+#define T0H_CYCLES  165
+#define T0L_CYCLES  495
+#define T1H_CYCLES  330
+#define T1L_CYCLES  330
+
+static inline void dwt_delay(uint32_t cycles)
 {
-	/* Each NOP takes ~1 cycle on Cortex-M7 */
-	/* Memory barrier prevents compiler reordering */
-	while (cycles--) {
-		__asm volatile ("nop" ::: "memory");
+	uint32_t start = DWT_CYCCNT_REG;
+	while ((DWT_CYCCNT_REG - start) < cycles) {
 	}
 }
 
-/**
- * @brief Send a single bit to SK6812
- *
- * Timing-critical function - interrupts should be disabled.
- */
+static void dwt_cycle_counter_init(void)
+{
+	DEMCR_REG |= DEMCR_TRCENA;
+	DWT_CYCCNT_REG = 0;
+	DWT_CTRL_REG |= DWT_CTRL_CYCCNTENA;
+}
+
 static inline void send_bit(bool bit)
 {
 	if (bit) {
-		/* Send '1': T1H (0.6us) high, T1L (0.6us) low */
-		*gpio_bsrr = gpio_set_mask;    /* Set HIGH */
-		delay_cycles(140);             /* ~0.5us @ 275MHz */
-		*gpio_bsrr = gpio_reset_mask;  /* Set LOW */
-		delay_cycles(140);             /* ~0.5us @ 275MHz */
+		*gpio_bsrr = gpio_set_mask;
+		dwt_delay(T1H_CYCLES);
+		*gpio_bsrr = gpio_reset_mask;
+		dwt_delay(T1L_CYCLES);
 	} else {
-		/* Send '0': T0H (0.3us) high, T0L (0.9us) low */
-		*gpio_bsrr = gpio_set_mask;    /* Set HIGH */
-		delay_cycles(60);              /* ~0.22us @ 275MHz */
-		*gpio_bsrr = gpio_reset_mask;  /* Set LOW */
-		delay_cycles(220);             /* ~0.8us @ 275MHz */
+		*gpio_bsrr = gpio_set_mask;
+		dwt_delay(T0H_CYCLES);
+		*gpio_bsrr = gpio_reset_mask;
+		dwt_delay(T0L_CYCLES);
 	}
 }
 
-/**
- * @brief Send a byte to SK6812 (MSB first)
- */
 static inline void send_byte(uint8_t byte)
 {
 	for (int i = 7; i >= 0; i--) {
@@ -101,49 +104,43 @@ static inline void send_byte(uint8_t byte)
 	}
 }
 
-/**
- * @brief Apply brightness scaling to a color value
- */
 static uint8_t apply_brightness(uint8_t value)
 {
 	return (uint8_t)((uint16_t)value * brightness_percent / 100);
 }
 
+/* Set all 7 LEDs to the base color for current state */
+static void apply_base_color(void)
+{
+	if (inventory_running) {
+		rgb_led_set_all(0, 0, LED_BRIGHTNESS);
+	} else {
+		rgb_led_set_all(LED_BRIGHTNESS, 0, 0);
+	}
+}
+
 int rgb_led_init(void)
 {
-	int ret;
-
-	/* Check GPIO device */
 	if (!gpio_is_ready_dt(&rgb_led_pin)) {
-		LOG_ERR("RGB LED GPIO device not ready");
+		LOG_ERR("RGB LED GPIO not ready");
 		return -ENODEV;
 	}
 
-	/* Configure as output, initially LOW */
-	ret = gpio_pin_configure_dt(&rgb_led_pin, GPIO_OUTPUT_INACTIVE);
+	int ret = gpio_pin_configure_dt(&rgb_led_pin, GPIO_OUTPUT_INACTIVE);
 	if (ret < 0) {
 		LOG_ERR("Failed to configure RGB LED GPIO: %d", ret);
 		return ret;
 	}
 
-	/* Get direct register access for fast bit-banging */
-	/* Get the pin number from pin spec */
-	uint8_t pin = rgb_led_pin.pin;
+	dwt_cycle_counter_init();
 
-	/* Set up masks for BSRR register */
-	gpio_set_mask = BIT(pin);           /* Lower 16 bits: set */
-	gpio_reset_mask = BIT(pin + 16);    /* Upper 16 bits: reset */
+	uint8_t pin = rgb_led_pin.pin;
+	gpio_set_mask = BIT(pin);
+	gpio_reset_mask = BIT(pin + 16);
 
 	/*
-	 * Get BSRR register address from the GPIO driver's config structure.
-	 * STM32H7 GPIO registers: base + 0x18 = BSRR
-	 *
-	 * The STM32 GPIO driver stores the port base address as the first
-	 * pointer after the common gpio_driver_config in its config struct.
-	 * We use a minimal struct definition to access it without including
-	 * the driver's private header.
-	 *
-	 * For GPIOG on STM32H7: base = 0x58021800
+	 * BSRR = GPIO base + 0x18.
+	 * Access base from driver config: common + uint32_t *base.
 	 */
 	struct gpio_stm32_config_min {
 		struct gpio_driver_config common;
@@ -157,37 +154,26 @@ int rgb_led_init(void)
 	LOG_INF("GPIO base=0x%08lx, BSRR=0x%08lx, pin=%u",
 		(unsigned long)gpio_base, (unsigned long)gpio_bsrr, pin);
 
-	/* Clear buffer */
 	memset(led_buffer, 0, sizeof(led_buffer));
-
-	/* Send initial reset and clear LEDs */
-	rgb_led_clear();
-	rgb_led_update();
-
 	initialized = true;
 
-	LOG_INF("RGB LED initialized (%d LEDs on PG2)", RGB_LED_COUNT);
+	/* Initial state: inventory OFF → RED */
+	apply_base_color();
+	rgb_led_update();
 
+	LOG_INF("RGB LED initialized (%d LEDs, DWT @550MHz)", RGB_LED_COUNT);
 	return 0;
 }
 
 void rgb_led_set_pixel(uint8_t index, uint8_t r, uint8_t g, uint8_t b)
 {
 	if (index >= RGB_LED_COUNT) {
-		LOG_WRN("Invalid LED index: %u (max %u)", index, RGB_LED_COUNT - 1);
 		return;
 	}
-
-	/* SK6812 uses GRB order */
 	uint8_t *pixel = &led_buffer[index * 3];
-	pixel[0] = g;  /* Green */
-	pixel[1] = r;  /* Red */
-	pixel[2] = b;  /* Blue */
-}
-
-void rgb_led_set_pixel_color(uint8_t index, rgb_color_t color)
-{
-	rgb_led_set_pixel(index, color.r, color.g, color.b);
+	pixel[0] = g;
+	pixel[1] = r;
+	pixel[2] = b;
 }
 
 void rgb_led_set_all(uint8_t r, uint8_t g, uint8_t b)
@@ -195,11 +181,6 @@ void rgb_led_set_all(uint8_t r, uint8_t g, uint8_t b)
 	for (uint8_t i = 0; i < RGB_LED_COUNT; i++) {
 		rgb_led_set_pixel(i, r, g, b);
 	}
-}
-
-void rgb_led_set_all_color(rgb_color_t color)
-{
-	rgb_led_set_all(color.r, color.g, color.b);
 }
 
 void rgb_led_clear(void)
@@ -213,33 +194,12 @@ void rgb_led_update(void)
 		return;
 	}
 
-	/*
-	 * WARNING: Interrupt-critical section.
-	 *
-	 * SK6812 bit-banging requires precise timing that cannot tolerate
-	 * interrupts. With 7 LEDs (21 bytes × 8 bits × ~1.25µs/bit ≈ 210µs),
-	 * interrupts are disabled for approximately 210µs.
-	 *
-	 * Impact on other subsystems:
-	 * - USB: May cause minor jitter, generally tolerable
-	 * - UART RX: 115200 baud = 86µs/byte, may lose 2-3 bytes max
-	 *
-	 * For applications requiring more LEDs or stricter real-time
-	 * requirements, consider migrating to SPI/DMA or PWM/DMA
-	 * based implementation.
-	 */
 	unsigned int key = irq_lock();
-
-	/* Send all bytes (GRB for each LED) */
 	for (size_t i = 0; i < sizeof(led_buffer); i++) {
-		uint8_t value = apply_brightness(led_buffer[i]);
-		send_byte(value);
+		send_byte(apply_brightness(led_buffer[i]));
 	}
-
-	/* Re-enable interrupts */
 	irq_unlock(key);
 
-	/* Reset pulse: >80us low */
 	k_busy_wait(100);
 }
 
@@ -249,7 +209,6 @@ void rgb_led_set_brightness(uint8_t percent)
 		percent = 100;
 	}
 	brightness_percent = percent;
-	LOG_INF("RGB LED brightness set to %u%%", brightness_percent);
 }
 
 uint8_t rgb_led_get_brightness(void)
@@ -260,59 +219,97 @@ uint8_t rgb_led_get_brightness(void)
 void rgb_led_test(void)
 {
 	if (!initialized) {
-		LOG_WRN("RGB LED not initialized");
 		return;
 	}
 
 	LOG_INF("RGB LED test starting...");
 
-	/* Cycle through colors */
 	const rgb_color_t colors[] = {
-		RGB_COLOR_RED,
-		RGB_COLOR_GREEN,
-		RGB_COLOR_BLUE,
-		RGB_COLOR_WHITE,
-		RGB_COLOR_YELLOW,
-		RGB_COLOR_CYAN,
-		RGB_COLOR_MAGENTA,
-		RGB_COLOR_OFF
+		RGB_COLOR_RED, RGB_COLOR_GREEN, RGB_COLOR_BLUE,
+		RGB_COLOR_WHITE, RGB_COLOR_YELLOW, RGB_COLOR_CYAN,
+		RGB_COLOR_MAGENTA, RGB_COLOR_OFF
 	};
 
 	for (size_t c = 0; c < ARRAY_SIZE(colors); c++) {
-		rgb_led_set_all_color(colors[c]);
+		rgb_led_set_all(colors[c].r, colors[c].g, colors[c].b);
 		rgb_led_update();
 		k_msleep(500);
 	}
 
+	apply_base_color();
+	rgb_led_update();
 	LOG_INF("RGB LED test complete");
 }
 
-void rgb_led_set_pattern(uint8_t pattern)
+void rgb_led_poll(void)
 {
-	switch (pattern) {
-	case 0:  /* Off */
-		rgb_led_clear();
-		break;
-	case 1:  /* Ready (green) */
-		rgb_led_set_all(0, 64, 0);
-		break;
-	case 2:  /* Active/busy (blue) */
-		rgb_led_set_all(0, 0, 64);
-		break;
-	case 3:  /* Warning (yellow) */
-		rgb_led_set_all(64, 64, 0);
-		break;
-	case 4:  /* Error (red) */
-		rgb_led_set_all(64, 0, 0);
-		break;
-	case 5:  /* Success (green pulse - just green for now) */
-		rgb_led_set_all(0, 128, 0);
-		break;
-	default:
-		rgb_led_clear();
-		break;
+	if (!initialized) {
+		return;
 	}
-	rgb_led_update();
+
+	int64_t now = k_uptime_get();
+
+	/* Error blink has highest priority */
+	if (error_active) {
+		if ((now - error_last) >= ERROR_BLINK_INTERVAL_MS) {
+			error_last = now;
+			error_on = !error_on;
+			if (error_on) {
+				rgb_led_set_all(LED_BRIGHTNESS, 0, 0);
+			} else {
+				rgb_led_clear();
+			}
+			led_dirty = true;
+		}
+	}
+
+	/* Tag blink timeout → return to base color */
+	if (tag_blink_active && (now - tag_blink_start) >= TAG_BLINK_DURATION_MS) {
+		tag_blink_active = false;
+		if (!error_active) {
+			apply_base_color();
+			led_dirty = true;
+		}
+	}
+
+	if (led_dirty) {
+		rgb_led_update();
+		led_dirty = false;
+	}
+}
+
+void rgb_led_set_inventory_status(bool running)
+{
+	inventory_running = running;
+	if (!error_active && !tag_blink_active) {
+		apply_base_color();
+		led_dirty = true;
+	}
+}
+
+void rgb_led_notify_tag_read(void)
+{
+	if (error_active) {
+		return;
+	}
+	rgb_led_clear();
+	tag_blink_active = true;
+	tag_blink_start = k_uptime_get();
+	led_dirty = true;
+}
+
+void rgb_led_set_error(bool active)
+{
+	error_active = active;
+	if (!active) {
+		apply_base_color();
+		led_dirty = true;
+	} else {
+		error_last = k_uptime_get();
+		error_on = true;
+		rgb_led_set_all(LED_BRIGHTNESS, 0, 0);
+		led_dirty = true;
+	}
 }
 
 /* ========================================================================
@@ -323,24 +320,21 @@ static int cmd_rgb_set(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 5) {
 		shell_print(sh, "Usage: rgb set <index> <r> <g> <b>");
-		shell_print(sh, "  index: 0-%d, r/g/b: 0-255", RGB_LED_COUNT - 1);
 		return -EINVAL;
 	}
 
 	int idx = atoi(argv[1]);
-	int r = atoi(argv[2]);
-	int g = atoi(argv[3]);
-	int b = atoi(argv[4]);
-
 	if (idx < 0 || idx >= RGB_LED_COUNT) {
-		shell_error(sh, "Invalid index: %d (must be 0-%d)", idx, RGB_LED_COUNT - 1);
+		shell_error(sh, "Invalid index (0-%d)", RGB_LED_COUNT - 1);
 		return -EINVAL;
 	}
 
-	rgb_led_set_pixel((uint8_t)idx, (uint8_t)r, (uint8_t)g, (uint8_t)b);
+	rgb_led_set_pixel((uint8_t)idx,
+			  (uint8_t)atoi(argv[2]),
+			  (uint8_t)atoi(argv[3]),
+			  (uint8_t)atoi(argv[4]));
 	rgb_led_update();
-
-	shell_print(sh, "LED %d set to RGB(%d, %d, %d)", idx, r, g, b);
+	shell_print(sh, "LED %d set", idx);
 	return 0;
 }
 
@@ -348,18 +342,14 @@ static int cmd_rgb_all(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 4) {
 		shell_print(sh, "Usage: rgb all <r> <g> <b>");
-		shell_print(sh, "  r/g/b: 0-255");
 		return -EINVAL;
 	}
 
-	int r = atoi(argv[1]);
-	int g = atoi(argv[2]);
-	int b = atoi(argv[3]);
-
-	rgb_led_set_all((uint8_t)r, (uint8_t)g, (uint8_t)b);
+	rgb_led_set_all((uint8_t)atoi(argv[1]),
+			(uint8_t)atoi(argv[2]),
+			(uint8_t)atoi(argv[3]));
 	rgb_led_update();
-
-	shell_print(sh, "All LEDs set to RGB(%d, %d, %d)", r, g, b);
+	shell_print(sh, "All LEDs set");
 	return 0;
 }
 
@@ -367,11 +357,9 @@ static int cmd_rgb_clear(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
-
 	rgb_led_clear();
 	rgb_led_update();
-
-	shell_print(sh, "All LEDs cleared");
+	shell_print(sh, "All LEDs off");
 	return 0;
 }
 
@@ -379,62 +367,32 @@ static int cmd_rgb_test(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
-
 	if (!initialized) {
-		shell_error(sh, "RGB LED not initialized");
+		shell_error(sh, "Not initialized");
 		return -ENODEV;
 	}
-
-	shell_print(sh, "Running RGB LED test...");
+	shell_print(sh, "Running test...");
 	rgb_led_test();
-	shell_print(sh, "Test complete");
-
+	shell_print(sh, "Done");
 	return 0;
 }
 
 static int cmd_rgb_brightness(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 2) {
-		shell_print(sh, "Current brightness: %u%%", brightness_percent);
-		shell_print(sh, "Usage: rgb brightness <0-100>");
+		shell_print(sh, "Brightness: %u%%", brightness_percent);
 		return 0;
 	}
 
 	int percent = atoi(argv[1]);
 	if (percent < 0 || percent > 100) {
-		shell_error(sh, "Invalid brightness: %d (must be 0-100)", percent);
+		shell_error(sh, "Must be 0-100");
 		return -EINVAL;
 	}
 
 	rgb_led_set_brightness((uint8_t)percent);
-	rgb_led_update();  /* Apply new brightness to current colors */
-
-	shell_print(sh, "Brightness set to %u%%", brightness_percent);
-	return 0;
-}
-
-static int cmd_rgb_pattern(const struct shell *sh, size_t argc, char **argv)
-{
-	if (argc < 2) {
-		shell_print(sh, "Usage: rgb pattern <0-5>");
-		shell_print(sh, "  0: Off");
-		shell_print(sh, "  1: Ready (green)");
-		shell_print(sh, "  2: Active (blue)");
-		shell_print(sh, "  3: Warning (yellow)");
-		shell_print(sh, "  4: Error (red)");
-		shell_print(sh, "  5: Success (green)");
-		return -EINVAL;
-	}
-
-	int pattern = atoi(argv[1]);
-	if (pattern < 0 || pattern > 5) {
-		shell_error(sh, "Invalid pattern: %d (must be 0-5)", pattern);
-		return -EINVAL;
-	}
-
-	rgb_led_set_pattern((uint8_t)pattern);
-	shell_print(sh, "Pattern %d applied", pattern);
-
+	rgb_led_update();
+	shell_print(sh, "Brightness: %u%%", brightness_percent);
 	return 0;
 }
 
@@ -442,24 +400,24 @@ static int cmd_rgb_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
-
-	shell_print(sh, "=== RGB LED Status ===");
 	shell_print(sh, "Initialized: %s", initialized ? "yes" : "no");
-	shell_print(sh, "LED count: %d", RGB_LED_COUNT);
+	shell_print(sh, "Inventory: %s", inventory_running ? "ON (BLUE)" : "OFF (RED)");
+	shell_print(sh, "Error: %s", error_active ? "BLINKING" : "none");
+	shell_print(sh, "Tag blink: %s", tag_blink_active ? "active" : "idle");
 	shell_print(sh, "Brightness: %u%%", brightness_percent);
-
+	shell_print(sh, "DWT timing: T0H=%d T0L=%d T1H=%d T1L=%d @550MHz",
+		    T0H_CYCLES, T0L_CYCLES, T1H_CYCLES, T1L_CYCLES);
 	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_rgb,
-	SHELL_CMD(set, NULL, "Set single LED: <idx> <r> <g> <b>", cmd_rgb_set),
-	SHELL_CMD(all, NULL, "Set all LEDs: <r> <g> <b>", cmd_rgb_all),
-	SHELL_CMD(clear, NULL, "Turn off all LEDs", cmd_rgb_clear),
-	SHELL_CMD(test, NULL, "Run color test", cmd_rgb_test),
-	SHELL_CMD(brightness, NULL, "Get/set brightness (0-100)", cmd_rgb_brightness),
-	SHELL_CMD(pattern, NULL, "Set status pattern (0-5)", cmd_rgb_pattern),
-	SHELL_CMD(status, NULL, "Show RGB LED status", cmd_rgb_status),
+	SHELL_CMD(set, NULL, "Set LED: <idx> <r> <g> <b>", cmd_rgb_set),
+	SHELL_CMD(all, NULL, "Set all: <r> <g> <b>", cmd_rgb_all),
+	SHELL_CMD(clear, NULL, "Turn off all", cmd_rgb_clear),
+	SHELL_CMD(test, NULL, "Color cycle test", cmd_rgb_test),
+	SHELL_CMD(brightness, NULL, "Get/set brightness", cmd_rgb_brightness),
+	SHELL_CMD(status, NULL, "Show state", cmd_rgb_status),
 	SHELL_SUBCMD_SET_END
 );
 
-SHELL_CMD_REGISTER(rgb, &sub_rgb, "RGB LED control commands", NULL);
+SHELL_CMD_REGISTER(rgb, &sub_rgb, "RGB LED control", NULL);
