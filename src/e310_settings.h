@@ -31,17 +31,17 @@ extern "C" {
 
 /* Magic number: "E310" in little-endian */
 #define E310_SETTINGS_MAGIC          0x30313345
-#define E310_SETTINGS_VERSION        0x01
+#define E310_SETTINGS_VERSION        0x03
 
 /* Default values */
-#define E310_DEFAULT_RF_POWER        20      /* 20 dBm (mid-range) */
+#define E310_DEFAULT_RF_POWER        5       /* 5 dBm (short range default) */
 #define E310_DEFAULT_ANTENNA         0x00    /* Default antenna config */
 #define E310_DEFAULT_FREQ_REGION     4       /* Korea */
 #define E310_DEFAULT_FREQ_START      0       /* First frequency index */
 #define E310_DEFAULT_FREQ_END        5       /* Last frequency index (Korean band: 0-5 = 6 channels) */
 #define E310_DEFAULT_INVENTORY_TIME  50      /* 5 seconds (50 x 100ms) */
 #define E310_DEFAULT_READER_ADDR     0xFF    /* Broadcast address */
-#define E310_DEFAULT_TYPING_SPEED    600     /* 600 CPM */
+#define E310_DEFAULT_TYPING_SPEED    6000    /* 6000 CPM = 100 chars/sec */
 
 /* Valid ranges */
 #define E310_RF_POWER_MIN            0
@@ -53,7 +53,7 @@ extern "C" {
 #define E310_INVENTORY_TIME_MIN      1
 #define E310_INVENTORY_TIME_MAX      255
 #define E310_TYPING_SPEED_MIN        100
-#define E310_TYPING_SPEED_MAX        1500
+#define E310_TYPING_SPEED_MAX        12000
 
 /* Frequency region codes */
 #define E310_FREQ_REGION_CHINA       1

@@ -235,6 +235,9 @@ extern "C" {
 /** Statistics data packet (used in inventory) */
 #define E310_STATUS_STATISTICS_DATA         0x26
 
+/** No operable tag found in field */
+#define E310_STATUS_NO_TAG                  0xFB
+
 /** Antenna connection error */
 #define E310_STATUS_ANTENNA_ERROR           0xF8
 
@@ -612,6 +615,15 @@ int e310_build_stop_fast_inventory(e310_context_t *ctx);
 int e310_build_tag_inventory_default(e310_context_t *ctx);
 
 /**
+ * @brief Build Tag Inventory with custom scan time
+ *
+ * @param ctx Protocol context
+ * @param scan_time Scan time in 100ms units (e.g., 10 = 1 second)
+ * @return Frame length ready to transmit, or negative error code
+ */
+int e310_build_tag_inventory_scan_time(e310_context_t *ctx, uint8_t scan_time);
+
+/**
  * @brief Build "Set Work Mode" command (0x7F)
  *
  * Used in connection sequence to initialize the reader.
@@ -813,6 +825,8 @@ int e310_build_setup_antenna_mux(e310_context_t *ctx, uint8_t antenna_config);
  * @return Frame length ready to transmit, or negative error code
  */
 int e310_build_enable_buzzer(e310_context_t *ctx, bool enable);
+
+int e310_build_enable_antenna_check(e310_context_t *ctx, bool enable);
 
 /**
  * @brief Build "GPIO Control" command (0x46)

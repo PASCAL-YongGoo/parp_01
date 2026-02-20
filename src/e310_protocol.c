@@ -148,23 +148,38 @@ int e310_build_start_fast_inventory(e310_context_t *ctx, uint8_t target)
 
 int e310_build_tag_inventory_default(e310_context_t *ctx)
 {
-	/* Tag Inventory (0x01) with default parameters captured from Windows software.
-	 * Windows sends: 09 00 01 04 FE 00 80 32 [CRC]
+	/* Tag Inventory (0x01) with 5-byte shortened format.
 	 *
-	 * NOTE: This is a 5-byte shortened format observed in practice.
 	 * Full protocol defines: QValue(1) + Session(1) + MaskMem(1) + MaskAdr(2) +
 	 *   MaskLen(1) + [MaskData] + [AdrTID] + [LenTID] + [Target] + [Ant] + [ScanTime]
 	 *
-	 * Interpreted as: QValue=0x04(Q=4), Session=0xFE(Smart),
+	 * Shortened: QValue=0x04(Q=4), Session=0x00(S0),
 	 *   MaskMem=0x00(none), MaskAdr=0x0080, ScanTime=0x32(50*100ms=5s)
+	 *
+	 * NOTE: Session must be 0x00(S0) for E310 FW v11.2. The Windows software
+	 *   value 0xFE is not a valid session per protocol spec and causes the
+	 *   E310 to silently fail tag detection.
 	 */
 	size_t idx = e310_build_frame_header(ctx, E310_CMD_TAG_INVENTORY, 5);
 
 	ctx->tx_buffer[idx++] = 0x04;  /* QValue: Q=4, no flags */
-	ctx->tx_buffer[idx++] = 0xFE;  /* Session: Smart (0xFE) */
+	ctx->tx_buffer[idx++] = 0x00;  /* Session: S0 (tags respond every scan) */
 	ctx->tx_buffer[idx++] = 0x00;  /* MaskMem: no mask */
 	ctx->tx_buffer[idx++] = 0x80;  /* MaskAdr high byte */
 	ctx->tx_buffer[idx++] = 0x32;  /* ScanTime: 50 = 5 seconds */
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_tag_inventory_scan_time(e310_context_t *ctx, uint8_t scan_time)
+{
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_TAG_INVENTORY, 5);
+
+	ctx->tx_buffer[idx++] = 0x04;
+	ctx->tx_buffer[idx++] = 0x00;
+	ctx->tx_buffer[idx++] = 0x00;
+	ctx->tx_buffer[idx++] = 0x80;
+	ctx->tx_buffer[idx++] = scan_time;
 
 	return e310_finalize_frame(ctx, idx);
 }
@@ -337,7 +352,7 @@ int e310_parse_tag_data(const uint8_t *data, size_t length, e310_tag_data_t *tag
 			tag->has_tid = false;
 		}
 	} else {
-		/* Data contains only EPC */
+		/* bit7=0: data is EPC only (no PC header) */
 		tag->epc_len = data_bytes;
 		if (tag->epc_len > E310_MAX_EPC_LENGTH) {
 			tag->epc_len = E310_MAX_EPC_LENGTH;
@@ -492,6 +507,7 @@ const char *e310_get_status_desc(uint8_t status)
 	case E310_STATUS_MORE_DATA:            return "More Data";
 	case E310_STATUS_MEMORY_FULL:          return "Memory Full";
 	case E310_STATUS_STATISTICS_DATA:      return "Statistics Data";
+	case E310_STATUS_NO_TAG:               return "No Tag Found";
 	case E310_STATUS_ANTENNA_ERROR:        return "Antenna Error";
 	case E310_STATUS_INVALID_LENGTH:       return "Invalid Length";
 	case E310_STATUS_INVALID_COMMAND_CRC:  return "Invalid Command/CRC";
@@ -890,6 +906,18 @@ int e310_build_enable_buzzer(e310_context_t *ctx, bool enable)
 	}
 
 	size_t idx = e310_build_frame_header(ctx, E310_CMD_ENABLE_DISABLE_BUZZER, 1);
+	ctx->tx_buffer[idx++] = enable ? 0x01 : 0x00;
+
+	return e310_finalize_frame(ctx, idx);
+}
+
+int e310_build_enable_antenna_check(e310_context_t *ctx, bool enable)
+{
+	if (!ctx) {
+		return E310_ERR_INVALID_PARAM;
+	}
+
+	size_t idx = e310_build_frame_header(ctx, E310_CMD_ENABLE_ANTENNA_CHECK, 1);
 	ctx->tx_buffer[idx++] = enable ? 0x01 : 0x00;
 
 	return e310_finalize_frame(ctx, idx);

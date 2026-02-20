@@ -171,8 +171,14 @@ int e310_settings_init(void)
 	}
 
 	if (settings.version != E310_SETTINGS_VERSION) {
-		LOG_WRN("Settings version mismatch (got %d, expected %d)",
+		LOG_WRN("Settings version mismatch (got %d, expected %d), resetting",
 			settings.version, E310_SETTINGS_VERSION);
+		ret = init_eeprom_defaults();
+		if (ret < 0) {
+			eeprom_available = false;
+			load_defaults();
+			return 0;
+		}
 	}
 
 	eeprom_available = true;
