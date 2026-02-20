@@ -13,8 +13,16 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/shell/shell.h>
+#include <stdlib.h>
 
 LOG_MODULE_REGISTER(switch_control, LOG_LEVEL_INF);
+
+/* Diagnostic counters — all updated from ISR, read from shell */
+static atomic_t diag_isr_count;        /* EXTI interrupt fired */
+static atomic_t diag_debounce_reject;  /* Rejected by 300ms lockout */
+static atomic_t diag_work_scheduled;   /* k_work_schedule succeeded */
+static atomic_t diag_toggle_count;     /* toggle_handler actually ran */
 
 /* SW0 device tree reference */
 #define SW0_NODE DT_ALIAS(sw0)
@@ -37,8 +45,15 @@ static void toggle_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
+	atomic_inc(&diag_toggle_count);
+
 	inventory_running = !inventory_running;
-	LOG_INF("SW0: Inventory %s", inventory_running ? "STARTED" : "STOPPED");
+	LOG_INF("SW0: Inventory %s (isr=%d deb=%d sched=%d tog=%d)",
+		inventory_running ? "STARTED" : "STOPPED",
+		(int)atomic_get(&diag_isr_count),
+		(int)atomic_get(&diag_debounce_reject),
+		(int)atomic_get(&diag_work_scheduled),
+		(int)atomic_get(&diag_toggle_count));
 
 	if (toggle_callback) {
 		toggle_callback(inventory_running);
@@ -52,14 +67,20 @@ static void sw0_pressed(const struct device *dev,
 	ARG_UNUSED(cb);
 	ARG_UNUSED(pins);
 
+	atomic_inc(&diag_isr_count);
+
 	int64_t now = k_uptime_get();
 
 	if ((now - last_press_time) < SWITCH_DEBOUNCE_MS) {
+		atomic_inc(&diag_debounce_reject);
 		return;
 	}
 	last_press_time = now;
 
-	k_work_schedule(&debounce_work, K_NO_WAIT);
+	int ret = k_work_schedule(&debounce_work, K_NO_WAIT);
+	if (ret >= 0) {
+		atomic_inc(&diag_work_scheduled);
+	}
 }
 
 int switch_control_init(void)
@@ -120,3 +141,48 @@ void switch_control_set_inventory_state(bool running)
 {
 	inventory_running = running;
 }
+
+/* ========================================================================
+ * Shell Commands
+ * ======================================================================== */
+
+static int cmd_sw0_diag(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int pin_val = gpio_pin_get_dt(&sw0);
+
+	shell_print(sh, "=== SW0 Diagnostics ===");
+	shell_print(sh, "Pin state (raw): %d  (%s)",
+		    pin_val, pin_val ? "PRESSED" : "released");
+	shell_print(sh, "inventory_running: %s",
+		    inventory_running ? "true" : "false");
+	shell_print(sh, "--- Counters ---");
+	shell_print(sh, "ISR fired:        %d", (int)atomic_get(&diag_isr_count));
+	shell_print(sh, "Debounce reject:  %d", (int)atomic_get(&diag_debounce_reject));
+	shell_print(sh, "Work scheduled:   %d", (int)atomic_get(&diag_work_scheduled));
+	shell_print(sh, "Toggle executed:  %d", (int)atomic_get(&diag_toggle_count));
+	return 0;
+}
+
+static int cmd_sw0_reset(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	atomic_set(&diag_isr_count, 0);
+	atomic_set(&diag_debounce_reject, 0);
+	atomic_set(&diag_work_scheduled, 0);
+	atomic_set(&diag_toggle_count, 0);
+	shell_print(sh, "SW0 counters reset");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_sw0,
+	SHELL_CMD(diag, NULL, "Show SW0 diagnostics", cmd_sw0_diag),
+	SHELL_CMD(reset, NULL, "Reset SW0 counters", cmd_sw0_reset),
+	SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(sw0, &sub_sw0, "SW0 button diagnostics", NULL);
