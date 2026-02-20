@@ -13,8 +13,8 @@
 
 #include <stdbool.h>
 
-/** Debounce time in milliseconds */
-#define SWITCH_DEBOUNCE_MS  50
+/** Debounce lockout in milliseconds - reject edges within this window */
+#define SWITCH_DEBOUNCE_MS  300
 
 /** Inventory toggle callback type */
 typedef void (*inventory_toggle_cb_t)(bool start);

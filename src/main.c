@@ -1,6 +1,7 @@
 /*
  * PARP-01 Application
- * - Console output via USB CDC ACM
+ * - Console/Shell output via USART1 (PB14-TX, PB15-RX)
+ * - USB HID Keyboard for EPC output
  * - LED blink on PE6 (TEST_LED)
  * - E310 RFID Protocol Library Testing
  * - SW0 button for inventory control
@@ -13,6 +14,9 @@
 #include <zephyr/usb/usbd.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_uart.h>
+
+#include <stm32_ll_bus.h>
+#include <stm32_ll_pwr.h>
 
 #include "usb_device.h"
 #include "usb_hid.h"
@@ -32,8 +36,31 @@ extern void e310_run_tests(void);
 static struct usbd_context *usb_ctx;
 static uart_router_t uart_router;
 
-/* USB host connection wait timeout (ms) */
-#define USB_HOST_WAIT_TIMEOUT_MS  5000
+/**
+ * @brief USB OTG HS pre-init workaround for STM32H723
+ *
+ * Performs an RCC peripheral reset of the USB OTG HS block before the
+ * Zephyr UDC driver initializes it.  This clears stale register state
+ * left over from a previous boot or soft-reset, which can cause
+ * USB_CoreReset() inside HAL_PCD_Init() to time out waiting for the
+ * GRSTCTL.AHBIDL or GRSTCTL.CSRST bits.
+ *
+ * This is a known issue on STM32H7 series:
+ *   - https://github.com/STMicroelectronics/STM32CubeH7/issues/163
+ *   - ST FAQ: "Troubleshooting a USB core soft reset stuck on an STM32"
+ *
+ * Must be called BEFORE usbd_enable().
+ */
+static void usb_otg_hs_pre_init(void)
+{
+	LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_USB1OTGHS);
+	LL_AHB1_GRP1_ForceReset(LL_AHB1_GRP1_PERIPH_USB1OTGHS);
+	k_busy_wait(10);
+	LL_AHB1_GRP1_ReleaseReset(LL_AHB1_GRP1_PERIPH_USB1OTGHS);
+	k_busy_wait(100);
+
+	printk("USB OTG HS peripheral reset done\n");
+}
 
 /**
  * @brief Print application banner
@@ -45,7 +72,7 @@ static void print_banner(void)
 	printk("  PARP-01 Custom Board Application\n");
 	printk("========================================\n");
 	printk("SYSCLK: 275 MHz (max safe for STM32H723)\n");
-	printk("Console: USB CDC ACM\n");
+	printk("Console: USART1 (PB14-TX, PB15-RX)\n");
 	printk("LED: PE6 (TEST_LED)\n");
 	printk("SW0: Inventory On/Off toggle\n");
 	printk("========================================\n");
@@ -76,23 +103,22 @@ static void usb_msg_cb(struct usbd_context *const ctx,
  * @brief Inventory toggle callback from switch
  *
  * Called when SW0 is pressed to toggle inventory on/off.
- * Automatically switches USB output mode:
- * - Inventory ON:  HID=ON, CDC=OFF (RFID pad mode)
- * - Inventory OFF: HID=OFF, CDC=ON (Debug mode)
+ * - Inventory ON:  HID keyboard enabled (RFID pad mode)
+ * - Inventory OFF: HID keyboard disabled (Debug mode)
  */
 static void on_inventory_toggle(bool start)
 {
 	if (start) {
-		LOG_INF("Switching to Inventory Mode");
 		shell_login_force_logout();
-		usb_hid_set_enabled(true);
-		uart_router_start_inventory(&uart_router);
-		LOG_INF("Inventory Mode: HID=ON");
+		int ret = uart_router_start_inventory(&uart_router);
+		if (ret < 0) {
+			switch_control_set_inventory_state(false);
+			rgb_led_set_inventory_status(false);
+			LOG_ERR("Inventory start failed: %d", ret);
+		}
 	} else {
-		LOG_INF("Switching to Debug Mode");
 		uart_router_stop_inventory(&uart_router);
-		usb_hid_set_enabled(false);
-		LOG_INF("Debug Mode: HID=OFF");
+		uart_router_set_mode(&uart_router, ROUTER_MODE_IDLE);
 	}
 }
 
@@ -139,7 +165,9 @@ int main(void)
 	gpio_pin_set_dt(&test_led, 0);
 	printk("LED blinked once\n");
 
-	/* Initialize USB HID keyboard */
+	/* Reset USB OTG HS peripheral BEFORE stack init to clear stale state */
+	usb_otg_hs_pre_init();
+
 	printk("Init USB HID...\n");
 	ret = parp_usb_hid_init();
 	if (ret < 0) {
@@ -149,17 +177,14 @@ int main(void)
 		printk("USB HID OK\n");
 	}
 
-	/* Initialize USB device stack */
 	printk("Init USB device stack...\n");
 	usb_ctx = usb_device_init(usb_msg_cb);
 	if (!usb_ctx) {
 		printk("USB device init failed (continuing anyway)\n");
 		LOG_ERR("Failed to initialize USB device stack");
-		/* Don't return - continue with other init */
 	} else {
 		printk("USB device stack OK\n");
 
-		/* Enable USB device */
 		if (!usbd_can_detect_vbus(usb_ctx)) {
 			ret = usbd_enable(usb_ctx);
 			if (ret) {
@@ -195,10 +220,6 @@ int main(void)
 	} else {
 		switch_control_set_inventory_callback(on_inventory_toggle);
 	}
-
-	usb_hid_set_enabled(false);
-	LOG_INF("Default mode: Debug (HID=OFF)");
-	LOG_INF("Press SW0 to switch to Inventory Mode");
 
 	/* Initialize password storage (must be before shell_login_init) */
 	ret = password_storage_init();
@@ -238,14 +259,9 @@ int main(void)
 	if (ret < 0) {
 		LOG_WRN("RGB LED init failed: %d", ret);
 	} else {
-		rgb_led_set_pattern(1);
+		rgb_led_set_inventory_status(false);
 	}
 
-	/* Wait for USB CDC ACM to be ready and print banner */
-	LOG_INF("Waiting for USB CDC ACM...");
-	k_msleep(USB_HOST_WAIT_TIMEOUT_MS);
-
-	/* Print banner */
 	print_banner();
 
 	/* E310 tests disabled - was causing stack overflow
@@ -253,28 +269,59 @@ int main(void)
 	printk("\n");
 	*/
 
-	/* E310 auto-start disabled for debugging
-	 * Use shell commands:
-	 *   e310 connect  - Initialize E310 connection
-	 *   e310 start    - Start inventory
-	 *   e310 stop     - Stop inventory
-	 */
-	uart_router_set_mode(&uart_router, ROUTER_MODE_IDLE);
-	switch_control_set_inventory_state(false);
-	LOG_INF("E310 ready - use 'e310 connect' then 'e310 start'");
+	/* Deferred auto-start: wait for USB HID ready, then connect E310.
+	 * Must run inside main loop so uart_router_process() is active
+	 * and can parse E310 responses (wait_for_e310_response depends on it). */
+	bool auto_started = false;
+	int64_t usb_ready_since = 0;
+	const int64_t boot_time = k_uptime_get();
+	#define AUTO_START_USB_SETTLE_MS  2000
+	#define AUTO_START_MAX_WAIT_MS   15000
 
-	LOG_INF("Starting main loop...");
-	LOG_INF("Press SW0 to toggle inventory On/Off");
-	LOG_INF("Shell commands: e310 connect, e310 start, e310 stop");
+	LOG_INF("Starting main loop (auto-start after USB ready, SW0 to toggle)");
 
 	while (1) {
 		uart_router_process(&uart_router);
+		rgb_led_poll();
 		k_msleep(10);
 
-		/* Check shell login timeout (less frequently) */
-		static int64_t last_login_check = 0;
 		int64_t now = k_uptime_get();
-		if ((now - last_login_check) >= 100) {
+
+		if (!auto_started) {
+			bool usb_ready = usb_hid_is_ready();
+			int64_t elapsed = now - boot_time;
+
+			if (usb_ready && usb_ready_since == 0) {
+				usb_ready_since = now;
+				LOG_INF("USB HID ready, E310 auto-start in %d ms",
+					AUTO_START_USB_SETTLE_MS);
+			}
+
+			bool usb_trigger = usb_ready_since > 0 &&
+				(now - usb_ready_since) >= AUTO_START_USB_SETTLE_MS;
+			bool timeout_trigger = elapsed >= AUTO_START_MAX_WAIT_MS;
+
+			if (usb_trigger || timeout_trigger) {
+				auto_started = true;
+				if (timeout_trigger && !usb_trigger) {
+					LOG_WRN("USB HID not ready after %lld ms, "
+						 "starting E310 anyway", elapsed);
+				}
+				LOG_INF("Auto-starting E310 inventory...");
+				ret = uart_router_start_inventory(&uart_router);
+				if (ret < 0) {
+					LOG_WRN("E310 auto-start failed: %d "
+						 "(use SW0 or 'e310 start')", ret);
+					uart_router_set_mode(&uart_router,
+							     ROUTER_MODE_IDLE);
+					switch_control_set_inventory_state(false);
+					rgb_led_set_inventory_status(false);
+				}
+			}
+		}
+
+		static int64_t last_login_check = 0;
+		if (now - last_login_check >= 100) {
 			last_login_check = now;
 			shell_login_check_timeout();
 		}

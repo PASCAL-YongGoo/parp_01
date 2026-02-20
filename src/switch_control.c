@@ -12,6 +12,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 LOG_MODULE_REGISTER(switch_control, LOG_LEVEL_INF);
 
@@ -25,35 +26,25 @@ LOG_MODULE_REGISTER(switch_control, LOG_LEVEL_INF);
 static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
 
 /* State variables */
-static bool inventory_running = true;  /* Start with inventory running */
+static bool inventory_running = false;
 static inventory_toggle_cb_t toggle_callback;
 static struct gpio_callback sw0_cb_data;
 
-/* Debounce work queue */
 static struct k_work_delayable debounce_work;
 static int64_t last_press_time;
 
-/**
- * @brief Debounce handler - called after debounce delay
- */
-static void debounce_handler(struct k_work *work)
+static void toggle_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	/* Toggle inventory state */
 	inventory_running = !inventory_running;
-
 	LOG_INF("SW0: Inventory %s", inventory_running ? "STARTED" : "STOPPED");
 
-	/* Call registered callback */
 	if (toggle_callback) {
 		toggle_callback(inventory_running);
 	}
 }
 
-/**
- * @brief SW0 GPIO interrupt callback
- */
 static void sw0_pressed(const struct device *dev,
 			struct gpio_callback *cb, uint32_t pins)
 {
@@ -63,14 +54,12 @@ static void sw0_pressed(const struct device *dev,
 
 	int64_t now = k_uptime_get();
 
-	/* Debounce check - ignore if too soon after last press */
 	if ((now - last_press_time) < SWITCH_DEBOUNCE_MS) {
 		return;
 	}
 	last_press_time = now;
 
-	/* Schedule debounced handler */
-	k_work_schedule(&debounce_work, K_MSEC(SWITCH_DEBOUNCE_MS));
+	k_work_schedule(&debounce_work, K_NO_WAIT);
 }
 
 int switch_control_init(void)
@@ -91,7 +80,7 @@ int switch_control_init(void)
 	}
 
 	/* Initialize debounce work (before callback registration) */
-	k_work_init_delayable(&debounce_work, debounce_handler);
+	k_work_init_delayable(&debounce_work, toggle_handler);
 
 	/* Register callback BEFORE enabling interrupt to prevent
 	 * race condition where interrupt fires before handler is set */
