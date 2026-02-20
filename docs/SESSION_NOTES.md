@@ -3178,3 +3178,99 @@ Memory region         Used Size  Region Size  %age Used
 | SW0 인벤토리 토글 | ✅ HW 검증 완료 |
 | EEPROM 설정 저장 | ✅ 구현 완료 |
 | Shell 로그인 보안 | ✅ 구현 완료 (개발 모드 비활성화) |
+
+---
+---
+
+## Session 19: SW0 무반응 분석 + 진단 카운터 추가 (2026-02-20)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99
+- **Build Status**: ✅ SUCCESS (FLASH 141,760B 13.52%, RAM 39,112B 11.94%)
+
+---
+
+### 분석 내용
+
+#### SW0 버튼 무반응 원인 분석
+
+**증상**: 인벤토리 동작 중 SW0을 눌러도 반응이 없는 경우가 간헐적으로 발생. 로그 메시지("SW0: Inventory ...")도 없음.
+
+**SW0 동작 방식**: GPIO 인터럽트 (EXTI10, `GPIO_INT_EDGE_TO_ACTIVE`) → 시스템 워크큐 `toggle_handler()` → `on_inventory_toggle()` 콜백
+
+**코드 전수 조사 결과**:
+
+1. **연속 인벤토리 중 `switch_control_set_inventory_state(false)` 자동 호출 여부**: ❌ 없음
+   - `inventory_interval_ms = 500` (연속 모드)에서는 `switch_control_set_inventory_state(false)` 호출 경로가 없음
+   - Single-shot(`interval_ms == 0`)에서만 호출됨 (현재 미사용)
+
+2. **`next_inventory_time` 덮어쓰기 레이스**: 존재하지만 무해
+   - 시스템 워크큐(priority -1, cooperative)가 메인 스레드(priority 0, preemptible)를 선점 가능
+   - `process_e310_frame()` 실행 중 SW0 ISR → 워크큐가 `next_inventory_time = 0` 설정 → 메인 스레드 복귀 시 `next_inventory_time = now + 500` 으로 덮어씀
+   - 그러나 `mode == ROUTER_MODE_INVENTORY` 가드가 이를 차단 (mode는 IDLE로 변경 완료)
+
+3. **인벤토리 상태 변수 구분**:
+   - `router->inventory_active`: 매 라운드마다 true↔false 토글 (정상 동작)
+   - `switch_control.inventory_running`: SW0 또는 명시적 API 호출에서만 변경 — 인벤토리 동작이 자동 변경하지 않음
+
+**결론**: 상태를 덮어쓰거나 취소하는 코드 경로 없음. `toggle_handler()` 로그가 안 나온다면 ISR 자체가 미발생일 가능성이 높음.
+
+---
+
+### Accomplishments
+
+#### 1. SW0 진단 카운터 및 셸 명령 추가
+
+4단계 파이프라인 각 단계에 atomic 카운터 추가:
+
+| 카운터 | 추적 대상 | 위치 |
+|--------|-----------|------|
+| `diag_isr_count` | EXTI 인터럽트 발생 | ISR (`sw0_pressed`) |
+| `diag_debounce_reject` | 300ms 록아웃 거부 | ISR |
+| `diag_work_scheduled` | 워크큐 등록 성공 | ISR |
+| `diag_toggle_count` | toggle_handler 실행 | 워크큐 |
+
+셸 명령:
+- `sw0 diag` — 핀 상태 + 카운터 출력
+- `sw0 reset` — 카운터 초기화
+
+`toggle_handler` 로그에 카운터 포함:
+```
+SW0: Inventory STOPPED (isr=3 deb=0 sched=3 tog=3)
+```
+
+**진단 포인트**:
+- ISR=0 → 인터럽트 미발생 (하드웨어/EXTI)
+- ISR > Work scheduled → 디바운스 거부 또는 k_work_schedule 실패
+- Work scheduled > Toggle → 워크큐 블로킹
+- 4개 동일 → 정상 (다른 원인 탐색)
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/switch_control.c    # 진단 카운터 4개 + 셸 명령 (sw0 diag/reset)
+└── docs/SESSION_NOTES.md   # 이 문서
+```
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      141760 B         1 MB     13.52%
+             RAM:       39112 B       320 KB     11.94%
+```
+
+---
+
+### 다음 단계
+
+1. **SW0 진단 HW 테스트** — `sw0 reset` → 버튼 누름 → `sw0 diag`로 파이프라인 확인
+2. **CDC ACM으로 셸 콘솔 이전** — DTS/prj.conf/usb_device.c 변경
+3. **데이터 전송 모드 선택** — HID 키보드 vs UART1 시리얼
+4. **Shell 로그인 프로덕션 재활성화** — `#if 0` → `#if 1`
