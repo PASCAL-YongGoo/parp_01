@@ -92,12 +92,13 @@
 		rgb-led = &rgb_led_sig;
 		e310-beep = &e310_beep;
 		sw-pwr = &sw_pwr;
+		watchdog0 = &iwdg1;
 	};
 };
 
 /* Clock Configuration - Custom Board with External Crystals
  * HSE: 8MHz external crystal (NOT bypass - real crystal oscillator)
- * LSE: 32.768kHz external crystal for RTC
+ * LSE: Not available on this board (disabled)
  * HSI: Keep enabled as backup
  * HSI48: For USB (matches STM32CubeIDE config)
  */
@@ -187,14 +188,6 @@
 	status = "okay";
 };
 
-/* UART5 (PB6-TX, PB5-RX) */
-&uart5 {
-	pinctrl-0 = <&uart5_tx_pb6 &uart5_rx_pb5>;
-	pinctrl-names = "default";
-	current-speed = <115200>;
-	status = "okay";
-};
-
 /* I2C4 (PB8-SCL, PB7-SDA) */
 &i2c4 {
 	pinctrl-0 = <&i2c4_scl_pb8 &i2c4_sda_pb7>;
@@ -235,10 +228,10 @@ zephyr_udc0: &usbotg_hs {
 	};
 };
 
-/* RTC with LSE as clock source */
+/* RTC with LSI as clock source (LSE not available on this board) */
 &rtc {
 	clocks = <&rcc STM32_CLOCK_BUS_APB4 0x00010000>,
-		 <&rcc STM32_SRC_LSE RTC_SEL(1)>; /* Use LSE instead of LSI */
+		 <&rcc STM32_SRC_LSI RTC_SEL(2)>;
 	status = "okay";
 };
 
@@ -249,6 +242,12 @@ zephyr_udc0: &usbotg_hs {
 
 /* Random Number Generator */
 &rng {
+	status = "okay";
+};
+
+
+/* Independent Watchdog (IWDG) */
+&iwdg1 {
 	status = "okay";
 };
 

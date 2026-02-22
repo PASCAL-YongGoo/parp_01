@@ -42,9 +42,9 @@ static const struct gpio_dt_spec sw0 = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
 
 static const struct gpio_dt_spec sw_pwr = GPIO_DT_SPEC_GET(SW_PWR_NODE, gpios);
 
-/* State variables */
-static bool inventory_running = false;
-static inventory_toggle_cb_t toggle_callback;
+/* State variables — atomic for ISR/thread safety */
+static atomic_t inventory_running = ATOMIC_INIT(0);
+static volatile inventory_toggle_cb_t toggle_callback;
 static struct gpio_callback sw0_cb_data;
 
 static struct k_work_delayable debounce_work;
@@ -56,16 +56,19 @@ static void toggle_handler(struct k_work *work)
 
 	atomic_inc(&diag_toggle_count);
 
-	inventory_running = !inventory_running;
+	atomic_val_t cur = atomic_get(&inventory_running);
+	atomic_set(&inventory_running, !cur);
+	bool running = !cur;
 	LOG_INF("SW0: Inventory %s (isr=%d deb=%d sched=%d tog=%d)",
-		inventory_running ? "STARTED" : "STOPPED",
+		running ? "STARTED" : "STOPPED",
 		(int)atomic_get(&diag_isr_count),
 		(int)atomic_get(&diag_debounce_reject),
 		(int)atomic_get(&diag_work_scheduled),
 		(int)atomic_get(&diag_toggle_count));
 
-	if (toggle_callback) {
-		toggle_callback(inventory_running);
+	inventory_toggle_cb_t cb = toggle_callback;
+	if (cb) {
+		cb(running);
 	}
 }
 
@@ -154,12 +157,12 @@ void switch_control_set_inventory_callback(inventory_toggle_cb_t cb)
 
 bool switch_control_is_inventory_running(void)
 {
-	return inventory_running;
+	return (bool)atomic_get(&inventory_running);
 }
 
 void switch_control_set_inventory_state(bool running)
 {
-	inventory_running = running;
+	atomic_set(&inventory_running, running ? 1 : 0);
 }
 
 /* ========================================================================
@@ -177,7 +180,7 @@ static int cmd_sw0_diag(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "Pin state (raw): %d  (%s)",
 		    pin_val, pin_val ? "PRESSED" : "released");
 	shell_print(sh, "inventory_running: %s",
-		    inventory_running ? "true" : "false");
+		    atomic_get(&inventory_running) ? "true" : "false");
 	shell_print(sh, "--- Counters ---");
 	shell_print(sh, "ISR fired:        %d", (int)atomic_get(&diag_isr_count));
 	shell_print(sh, "Debounce reject:  %d", (int)atomic_get(&diag_debounce_reject));
