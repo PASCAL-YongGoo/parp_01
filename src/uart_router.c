@@ -2026,9 +2026,21 @@ static int cmd_e310_interval(const struct shell *sh, size_t argc, char **argv)
 		return 0;
 	}
 
-	uint32_t ms = atoi(argv[1]);
-	g_router_instance->inventory_interval_ms = ms;
-	shell_print(sh, "Inventory interval set to %u ms", ms);
+	int ms = atoi(argv[1]);
+	if (ms < E310_INV_INTERVAL_MIN || ms > E310_INV_INTERVAL_MAX) {
+		shell_error(sh, "Invalid interval: %d (must be %d-%d)",
+			    ms, E310_INV_INTERVAL_MIN, E310_INV_INTERVAL_MAX);
+		return -EINVAL;
+	}
+
+	g_router_instance->inventory_interval_ms = (uint32_t)ms;
+	int ret = e310_settings_set_inventory_interval((uint16_t)ms);
+	shell_print(sh, "Inventory interval set to %d ms%s",
+		    ms, (ret < 0) ? "" : " (saved)");
+	if (ret < 0) {
+		shell_warn(sh, "EEPROM save failed: %d (change is temporary)", ret);
+	}
+
 	return 0;
 }
 
@@ -2189,7 +2201,7 @@ static int cmd_hid_speed(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 2) {
 		shell_print(sh, "Current typing speed: %u CPM", usb_hid_get_typing_speed());
-		shell_print(sh, "Usage: hid speed <100-1500>");
+		shell_print(sh, "Usage: hid speed <100-12000>");
 		return 0;
 	}
 
@@ -2200,7 +2212,13 @@ static int cmd_hid_speed(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "Typing speed set to %u CPM", usb_hid_get_typing_speed());
+	/* Persist to EEPROM */
+	ret = e310_settings_set_typing_speed((uint16_t)speed);
+	shell_print(sh, "Typing speed set to %u CPM%s",
+		    usb_hid_get_typing_speed(), (ret < 0) ? "" : " (saved)");
+	if (ret < 0) {
+		shell_warn(sh, "EEPROM save failed: %d (change is temporary)", ret);
+	}
 	return 0;
 }
 
@@ -2218,9 +2236,20 @@ static int cmd_hid_debounce(const struct shell *sh, size_t argc, char **argv)
 		return 0;
 	}
 
-	uint32_t sec = atoi(argv[1]);
-	epc_filter_set_debounce(&g_router_instance->epc_filter, sec);
-	shell_print(sh, "Debounce set to %u seconds", sec);
+	int sec = atoi(argv[1]);
+	if (sec < E310_EPC_DEBOUNCE_MIN || sec > E310_EPC_DEBOUNCE_MAX) {
+		shell_error(sh, "Invalid debounce: %d (must be %d-%d)",
+			    sec, E310_EPC_DEBOUNCE_MIN, E310_EPC_DEBOUNCE_MAX);
+		return -EINVAL;
+	}
+
+	epc_filter_set_debounce(&g_router_instance->epc_filter, (uint32_t)sec);
+	int ret = e310_settings_set_epc_debounce((uint8_t)sec);
+	shell_print(sh, "Debounce set to %d seconds%s",
+		    sec, (ret < 0) ? "" : " (saved)");
+	if (ret < 0) {
+		shell_warn(sh, "EEPROM save failed: %d (change is temporary)", ret);
+	}
 	return 0;
 }
 

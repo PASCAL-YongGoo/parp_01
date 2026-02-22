@@ -16,6 +16,7 @@
 #include <zephyr/shell/shell.h>
 #include <string.h>
 #include <stdlib.h>
+#include "e310_settings.h"
 
 LOG_MODULE_REGISTER(rgb_led, LOG_LEVEL_INF);
 
@@ -392,7 +393,13 @@ static int cmd_rgb_brightness(const struct shell *sh, size_t argc, char **argv)
 
 	rgb_led_set_brightness((uint8_t)percent);
 	rgb_led_update();
-	shell_print(sh, "Brightness: %u%%", brightness_percent);
+	/* Persist to EEPROM */
+	int ret = e310_settings_set_rgb_brightness((uint8_t)percent);
+	shell_print(sh, "Brightness: %u%%%s",
+		    brightness_percent, (ret < 0) ? "" : " (saved)");
+	if (ret < 0) {
+		shell_warn(sh, "EEPROM save failed: %d (change is temporary)", ret);
+	}
 	return 0;
 }
 

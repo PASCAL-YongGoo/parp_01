@@ -13,8 +13,12 @@
 
 LOG_MODULE_REGISTER(e310_settings, LOG_LEVEL_INF);
 
-#define CRC_DATA_SIZE  (E310_SETTINGS_SIZE - 2)
+#define CRC_DATA_SIZE  offsetof(e310_settings_t, crc16)
 
+BUILD_ASSERT(sizeof(e310_settings_t) == 46,
+	     "e310_settings_t size changed — update EEPROM layout!");
+BUILD_ASSERT(offsetof(e310_settings_t, crc16) == 44,
+	     "CRC field offset changed — EEPROM binary compat broken!");
 static e310_settings_t settings;
 static bool eeprom_available;
 static const struct device *eeprom_dev;
@@ -51,6 +55,11 @@ static void load_defaults(void)
 	settings.inventory_time = E310_DEFAULT_INVENTORY_TIME;
 	settings.reader_addr = E310_DEFAULT_READER_ADDR;
 	settings.typing_speed = E310_DEFAULT_TYPING_SPEED;
+	settings.beep_pulse_ms = E310_DEFAULT_BEEP_PULSE_MS;
+	settings.beep_filter_ms = E310_DEFAULT_BEEP_FILTER_MS;
+	settings.epc_debounce_sec = E310_DEFAULT_EPC_DEBOUNCE_SEC;
+	settings.inventory_interval_ms = E310_DEFAULT_INV_INTERVAL_MS;
+	settings.rgb_brightness = E310_DEFAULT_RGB_BRIGHTNESS;
 }
 
 static int eeprom_read_settings(void)
@@ -157,22 +166,40 @@ int e310_settings_init(void)
 			load_defaults();
 			return 0;
 		}
+		eeprom_available = true;
+		return 0;
 	}
 
-	if (!verify_crc()) {
-		LOG_ERR("E310 settings CRC mismatch");
-		LOG_WRN("Using default settings due to CRC error");
-		ret = init_eeprom_defaults();
+	/*
+	 * Version migration BEFORE CRC check.
+	 * Old firmware had a CRC bug (CRC covered the CRC field itself),
+	 * so v3 data always has an invalid CRC.  We must migrate by
+	 * version first, then recompute CRC, to preserve existing settings.
+	 */
+	if (settings.version != E310_SETTINGS_VERSION) {
+		LOG_WRN("Settings version mismatch (got %d, expected %d), migrating",
+			settings.version, E310_SETTINGS_VERSION);
+		/* Fields from v0x03 and earlier are at the same offsets, so they
+		 * survive the read.  Only set new v0x04 fields to defaults. */
+		settings.beep_pulse_ms = E310_DEFAULT_BEEP_PULSE_MS;
+		settings.beep_filter_ms = E310_DEFAULT_BEEP_FILTER_MS;
+		settings.epc_debounce_sec = E310_DEFAULT_EPC_DEBOUNCE_SEC;
+		settings.inventory_interval_ms = E310_DEFAULT_INV_INTERVAL_MS;
+		settings.rgb_brightness = E310_DEFAULT_RGB_BRIGHTNESS;
+		settings.version = E310_SETTINGS_VERSION;
+		update_crc();
+		ret = eeprom_write_verified();
 		if (ret < 0) {
+			LOG_ERR("Migration write failed: %d", ret);
 			eeprom_available = false;
 			load_defaults();
 			return 0;
 		}
-	}
-
-	if (settings.version != E310_SETTINGS_VERSION) {
-		LOG_WRN("Settings version mismatch (got %d, expected %d), resetting",
-			settings.version, E310_SETTINGS_VERSION);
+		LOG_INF("Settings migrated to v%d", E310_SETTINGS_VERSION);
+	} else if (!verify_crc()) {
+		/* CRC check only for current-version data (migration recalculates CRC) */
+		LOG_ERR("E310 settings CRC mismatch");
+		LOG_WRN("Using default settings due to CRC error");
 		ret = init_eeprom_defaults();
 		if (ret < 0) {
 			eeprom_available = false;
@@ -339,6 +366,81 @@ uint16_t e310_settings_get_typing_speed(void)
 	return settings.typing_speed;
 }
 
+int e310_settings_set_beep_pulse(uint16_t ms)
+{
+	if (ms < E310_BEEP_PULSE_MIN || ms > E310_BEEP_PULSE_MAX) {
+		return -EINVAL;
+	}
+
+	settings.beep_pulse_ms = ms;
+	return e310_settings_save();
+}
+
+uint16_t e310_settings_get_beep_pulse(void)
+{
+	return settings.beep_pulse_ms;
+}
+
+int e310_settings_set_beep_filter(uint16_t ms)
+{
+	if (ms < E310_BEEP_FILTER_MIN || ms > E310_BEEP_FILTER_MAX) {
+		return -EINVAL;
+	}
+
+	settings.beep_filter_ms = ms;
+	return e310_settings_save();
+}
+
+uint16_t e310_settings_get_beep_filter(void)
+{
+	return settings.beep_filter_ms;
+}
+
+int e310_settings_set_epc_debounce(uint8_t sec)
+{
+	if (sec > E310_EPC_DEBOUNCE_MAX) {
+		return -EINVAL;
+	}
+
+	settings.epc_debounce_sec = sec;
+	return e310_settings_save();
+}
+
+uint8_t e310_settings_get_epc_debounce(void)
+{
+	return settings.epc_debounce_sec;
+}
+
+int e310_settings_set_inventory_interval(uint16_t ms)
+{
+	if (ms > E310_INV_INTERVAL_MAX) {
+		return -EINVAL;
+	}
+
+	settings.inventory_interval_ms = ms;
+	return e310_settings_save();
+}
+
+uint16_t e310_settings_get_inventory_interval(void)
+{
+	return settings.inventory_interval_ms;
+}
+
+int e310_settings_set_rgb_brightness(uint8_t percent)
+{
+	if (percent > E310_RGB_BRIGHTNESS_MAX) {
+		return -EINVAL;
+	}
+
+	settings.rgb_brightness = percent;
+	return e310_settings_save();
+}
+
+uint8_t e310_settings_get_rgb_brightness(void)
+{
+	return settings.rgb_brightness;
+}
+
 void e310_settings_print(const struct shell *sh)
 {
 	const char *region_str;
@@ -363,16 +465,21 @@ void e310_settings_print(const struct shell *sh)
 
 	if (sh) {
 		shell_print(sh, "=== E310 Settings ===");
-		shell_print(sh, "  EEPROM:      %s", eeprom_available ? "Available" : "Not available");
-		shell_print(sh, "  RF Power:    %d dBm", settings.rf_power);
-		shell_print(sh, "  Antenna:     0x%02x", settings.antenna_config);
-		shell_print(sh, "  Freq Region: %s (%d)", region_str, settings.freq_region);
-		shell_print(sh, "  Freq Range:  %d - %d", settings.freq_start, settings.freq_end);
-		shell_print(sh, "  Inv Time:    %d (%.1f sec)", settings.inventory_time,
+		shell_print(sh, "  EEPROM:       %s", eeprom_available ? "Available" : "Not available");
+		shell_print(sh, "  RF Power:     %d dBm", settings.rf_power);
+		shell_print(sh, "  Antenna:      0x%02x", settings.antenna_config);
+		shell_print(sh, "  Freq Region:  %s (%d)", region_str, settings.freq_region);
+		shell_print(sh, "  Freq Range:   %d - %d", settings.freq_start, settings.freq_end);
+		shell_print(sh, "  Inv Time:     %d (%.1f sec)", settings.inventory_time,
 			    (double)(settings.inventory_time * 0.1f));
-		shell_print(sh, "  Reader Addr: 0x%02x", settings.reader_addr);
+		shell_print(sh, "  Reader Addr:  0x%02x", settings.reader_addr);
 		shell_print(sh, "  Typing Speed: %d CPM", settings.typing_speed);
-		shell_print(sh, "  Changed:     %s",
+		shell_print(sh, "  Beep Pulse:   %d ms", settings.beep_pulse_ms);
+		shell_print(sh, "  Beep Filter:  %d ms", settings.beep_filter_ms);
+		shell_print(sh, "  EPC Debounce: %d sec", settings.epc_debounce_sec);
+		shell_print(sh, "  Inv Interval: %d ms", settings.inventory_interval_ms);
+		shell_print(sh, "  RGB Bright:   %d %%", settings.rgb_brightness);
+		shell_print(sh, "  Changed:      %s",
 			    (settings.flags & E310_FLAG_SETTINGS_CHANGED) ? "Yes" : "No");
 	} else {
 		LOG_INF("E310 Settings: RF=%d dBm, Ant=0x%02x, Freq=%s/%d-%d, Inv=%d, Speed=%d",
@@ -380,4 +487,5 @@ void e310_settings_print(const struct shell *sh)
 			region_str, settings.freq_start, settings.freq_end,
 			settings.inventory_time, settings.typing_speed);
 	}
+
 }

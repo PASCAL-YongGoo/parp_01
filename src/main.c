@@ -14,6 +14,7 @@
 #include <zephyr/usb/usbd.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_uart.h>
+#include <zephyr/drivers/watchdog.h>
 
 #include <stm32_ll_bus.h>
 #include <stm32_ll_pwr.h>
@@ -71,7 +72,7 @@ static void print_banner(void)
 	printk("========================================\n");
 	printk("  PARP-01 Custom Board Application\n");
 	printk("========================================\n");
-	printk("SYSCLK: 275 MHz (max safe for STM32H723)\n");
+	printk("SYSCLK: 550 MHz, HCLK: 275 MHz\n");
 	printk("Console: USART1 (PB14-TX, PB15-RX)\n");
 	printk("LED: PE6 (TEST_LED)\n");
 	printk("SW0: Inventory On/Off toggle\n");
@@ -158,6 +159,38 @@ int main(void)
 		return ret;
 	}
 	printk("LED configured\n");
+
+	/* === Watchdog (IWDG) === */
+	const struct device *const wdt = DEVICE_DT_GET(DT_ALIAS(watchdog0));
+	int wdt_channel_id = -1;
+
+	if (!device_is_ready(wdt)) {
+		printk("ERROR: Watchdog device not ready!\n");
+		LOG_ERR("Watchdog device not ready");
+	} else {
+		struct wdt_timeout_cfg wdt_config = {
+			.flags = WDT_FLAG_RESET_SOC,
+			.window.min = 0U,
+			.window.max = 2000U,
+			.callback = NULL,
+		};
+
+		wdt_channel_id = wdt_install_timeout(wdt, &wdt_config);
+		if (wdt_channel_id < 0) {
+			printk("ERROR: WDT install timeout failed: %d\n", wdt_channel_id);
+			LOG_ERR("WDT install timeout failed: %d", wdt_channel_id);
+		} else {
+			ret = wdt_setup(wdt, WDT_OPT_PAUSE_HALTED_BY_DBG);
+			if (ret < 0) {
+				printk("ERROR: WDT setup failed: %d\n", ret);
+				LOG_ERR("WDT setup failed: %d", ret);
+				wdt_channel_id = -1;
+			} else {
+				printk("Watchdog started (2000 ms timeout)\n");
+				LOG_INF("IWDG watchdog active: 2000 ms timeout");
+			}
+		}
+	}
 
 	/* Blink LED once to show we're alive */
 	gpio_pin_set_dt(&test_led, 1);
@@ -262,6 +295,17 @@ int main(void)
 		rgb_led_set_inventory_status(false);
 	}
 
+
+	/* Apply remaining persisted settings (modules must be initialized first) */
+	beep_control_set_pulse_ms(e310_settings_get_beep_pulse());
+	beep_control_set_filter_ms(e310_settings_get_beep_filter());
+	uart_router.epc_filter.debounce_ms =
+		(uint32_t)e310_settings_get_epc_debounce() * 1000;
+	uart_router.inventory_interval_ms =
+		e310_settings_get_inventory_interval();
+	rgb_led_set_brightness(e310_settings_get_rgb_brightness());
+	LOG_INF("Persisted settings applied from EEPROM");
+
 	print_banner();
 
 	/* E310 tests disabled - was causing stack overflow
@@ -284,6 +328,11 @@ int main(void)
 		uart_router_process(&uart_router);
 		rgb_led_poll();
 		k_msleep(10);
+
+		/* Feed watchdog every loop iteration (~10 ms) */
+		if (wdt_channel_id >= 0) {
+			wdt_feed(wdt, wdt_channel_id);
+		}
 
 		int64_t now = k_uptime_get();
 

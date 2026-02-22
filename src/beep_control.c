@@ -12,6 +12,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 #include <stdlib.h>
+#include "e310_settings.h"
 
 LOG_MODULE_REGISTER(beep_control, LOG_LEVEL_INF);
 
@@ -287,7 +288,13 @@ static int cmd_beep_pulse(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	beep_control_set_pulse_ms((uint16_t)ms);
-	shell_print(sh, "Pulse width set to %u ms", beep_pulse_ms);
+	/* Persist to EEPROM */
+	int ret = e310_settings_set_beep_pulse((uint16_t)ms);
+	shell_print(sh, "Pulse width set to %u ms%s",
+		    beep_pulse_ms, (ret < 0) ? "" : " (saved)");
+	if (ret < 0) {
+		shell_warn(sh, "EEPROM save failed: %d (change is temporary)", ret);
+	}
 
 	return 0;
 }
@@ -308,7 +315,13 @@ static int cmd_beep_filter(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	beep_control_set_filter_ms((uint16_t)ms);
-	shell_print(sh, "Filter time set to %u ms", beep_filter_ms);
+	/* Persist to EEPROM */
+	int ret = e310_settings_set_beep_filter((uint16_t)ms);
+	shell_print(sh, "Filter time set to %u ms%s",
+		    beep_filter_ms, (ret < 0) ? "" : " (saved)");
+	if (ret < 0) {
+		shell_warn(sh, "EEPROM save failed: %d (change is temporary)", ret);
+	}
 
 	return 0;
 }

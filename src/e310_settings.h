@@ -11,6 +11,7 @@
 #define E310_SETTINGS_H
 
 #include <zephyr/kernel.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -27,11 +28,11 @@ extern "C" {
  * 0x0060-0x1FFF: Reserved for future use
  */
 #define E310_SETTINGS_EEPROM_OFFSET  0x0030
-#define E310_SETTINGS_SIZE           48
+#define E310_SETTINGS_EEPROM_SIZE    48      /* EEPROM allocation (page-aligned) */
 
 /* Magic number: "E310" in little-endian */
 #define E310_SETTINGS_MAGIC          0x30313345
-#define E310_SETTINGS_VERSION        0x03
+#define E310_SETTINGS_VERSION        0x04
 
 /* Default values */
 #define E310_DEFAULT_RF_POWER        5       /* 5 dBm (short range default) */
@@ -42,7 +43,11 @@ extern "C" {
 #define E310_DEFAULT_INVENTORY_TIME  50      /* 5 seconds (50 x 100ms) */
 #define E310_DEFAULT_READER_ADDR     0xFF    /* Broadcast address */
 #define E310_DEFAULT_TYPING_SPEED    6000    /* 6000 CPM = 100 chars/sec */
-
+#define E310_DEFAULT_BEEP_PULSE_MS   100     /* Beep pulse width in ms */
+#define E310_DEFAULT_BEEP_FILTER_MS  1000    /* Beep duplicate filter in ms */
+#define E310_DEFAULT_EPC_DEBOUNCE_SEC 1      /* EPC debounce in seconds */
+#define E310_DEFAULT_INV_INTERVAL_MS 500     /* Inventory interval in ms */
+#define E310_DEFAULT_RGB_BRIGHTNESS  100     /* RGB LED brightness 0-100% */
 /* Valid ranges */
 #define E310_RF_POWER_MIN            0
 #define E310_RF_POWER_MAX            30
@@ -54,6 +59,16 @@ extern "C" {
 #define E310_INVENTORY_TIME_MAX      255
 #define E310_TYPING_SPEED_MIN        100
 #define E310_TYPING_SPEED_MAX        12000
+#define E310_BEEP_PULSE_MIN          10
+#define E310_BEEP_PULSE_MAX          1000
+#define E310_BEEP_FILTER_MIN         100
+#define E310_BEEP_FILTER_MAX         10000
+#define E310_EPC_DEBOUNCE_MIN        0
+#define E310_EPC_DEBOUNCE_MAX        60
+#define E310_INV_INTERVAL_MIN        0
+#define E310_INV_INTERVAL_MAX        10000
+#define E310_RGB_BRIGHTNESS_MIN      0
+#define E310_RGB_BRIGHTNESS_MAX      100
 
 /* Frequency region codes */
 #define E310_FREQ_REGION_CHINA       1
@@ -64,36 +79,35 @@ extern "C" {
 /**
  * @brief E310 persistent settings structure
  *
- * This structure is stored in EEPROM and loaded on boot.
- * Total size: 48 bytes (matches EEPROM page size for atomic write)
+ * Stored in EEPROM and loaded on boot. sizeof() = 46 bytes.
+ * CRC covers all fields BEFORE the crc16 field (offsetof(crc16) bytes).
  */
 typedef struct __packed {
     /* Header (6 bytes) */
     uint32_t magic;              /* 0x30313345 ("E310") */
-    uint8_t  version;            /* Structure version (0x01) */
+    uint8_t  version;            /* Structure version */
     uint8_t  flags;              /* Bit 0: settings_changed */
-
-    /* RF Settings (2 bytes) */
     uint8_t  rf_power;           /* 0-30 dBm */
     uint8_t  antenna_config;     /* Antenna selection (0x00-0xFF) */
-
-    /* Frequency Settings (3 bytes) */
     uint8_t  freq_region;        /* 1=CN, 2=US, 3=EU, 4=KR */
     uint8_t  freq_start;         /* Start frequency index (0-62) */
     uint8_t  freq_end;           /* End frequency index (0-62) */
-
-    /* Inventory Settings (2 bytes) */
     uint8_t  inventory_time;     /* Scan time (1-255 x 100ms) */
     uint8_t  reader_addr;        /* Reader address (0x00-0xFF) */
+    uint16_t typing_speed;       /* Typing speed (100-12000 CPM) */
 
-    /* HID Settings (2 bytes) */
-    uint16_t typing_speed;       /* Typing speed (100-1500 CPM) */
+    /* Peripheral Settings — added in v0x04 (8 bytes) */
+    uint16_t beep_pulse_ms;      /* Beep pulse width (10-1000 ms) */
+    uint16_t beep_filter_ms;     /* Beep duplicate filter (100-10000 ms) */
+    uint8_t  epc_debounce_sec;   /* EPC debounce time (0-60 seconds) */
+    uint16_t inventory_interval_ms; /* Inventory interval (0-10000 ms) */
+    uint8_t  rgb_brightness;     /* RGB LED brightness (0-100 %) */
 
-    /* Reserved for future use (29 bytes) */
-    uint8_t  reserved[29];
+    /* Reserved for future use (21 bytes) */
+    uint8_t  reserved[21];
 
-    /* Integrity check (2 bytes) */
-    uint16_t crc16;              /* CRC-16-CCITT over bytes 0-45 */
+    /* Integrity check (2 bytes) — MUST be the last field */
+    uint16_t crc16;              /* CRC-16-CCITT over bytes 0..(offsetof(crc16)-1) */
 } e310_settings_t;
 
 /* Flags bit definitions */
@@ -224,22 +238,53 @@ uint8_t e310_settings_get_reader_addr(void);
 
 /**
  * @brief Set HID typing speed and save to EEPROM
- *
- * @param cpm Typing speed in characters per minute (100-1500)
- * @return 0 on success, -EINVAL if out of range, negative error on save failure
+ * @param cpm Typing speed in characters per minute (100-12000)
+ * @return 0 on success, -EINVAL if out of range
  */
 int e310_settings_set_typing_speed(uint16_t cpm);
+uint16_t e310_settings_get_typing_speed(void);
+/**
+ * @brief Set beep pulse width and save to EEPROM
+ * @param ms Pulse width in milliseconds (10-1000)
+ * @return 0 on success, -EINVAL if out of range
+ */
+int e310_settings_set_beep_pulse(uint16_t ms);
+uint16_t e310_settings_get_beep_pulse(void);
 
 /**
- * @brief Get current HID typing speed setting
- *
- * @return Typing speed in characters per minute (100-1500)
+ * @brief Set beep filter time and save to EEPROM
+ * @param ms Filter time in milliseconds (100-10000)
+ * @return 0 on success, -EINVAL if out of range
  */
-uint16_t e310_settings_get_typing_speed(void);
+int e310_settings_set_beep_filter(uint16_t ms);
+uint16_t e310_settings_get_beep_filter(void);
+
+/**
+ * @brief Set EPC debounce time and save to EEPROM
+ * @param sec Debounce in seconds (0-60)
+ * @return 0 on success, -EINVAL if out of range
+ */
+int e310_settings_set_epc_debounce(uint8_t sec);
+uint8_t e310_settings_get_epc_debounce(void);
+
+/**
+ * @brief Set inventory interval and save to EEPROM
+ * @param ms Interval in milliseconds (0-10000)
+ * @return 0 on success, -EINVAL if out of range
+ */
+int e310_settings_set_inventory_interval(uint16_t ms);
+uint16_t e310_settings_get_inventory_interval(void);
+
+/**
+ * @brief Set RGB LED brightness and save to EEPROM
+ * @param percent Brightness percentage (0-100)
+ * @return 0 on success, -EINVAL if out of range
+ */
+int e310_settings_set_rgb_brightness(uint8_t percent);
+uint8_t e310_settings_get_rgb_brightness(void);
 
 /**
  * @brief Print current settings to shell
- *
  * @param sh Shell instance (can be NULL for LOG output)
  */
 void e310_settings_print(const struct shell *sh);
