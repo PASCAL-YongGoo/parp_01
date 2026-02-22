@@ -3362,3 +3362,240 @@ Memory region         Used Size  Region Size  %age Used
 - [ ] SW0 토글로 인벤토리 ON/OFF 안정 동작
 - [ ] 연속 누름 시 디바운스 정상 (300ms 록아웃)
 - [ ] SW1 (PD11) 하드웨어 동작 확인 (향후 기능 추가 시)
+
+---
+
+## Session 21: EEPROM 설정 확장 — Peripheral Settings 영속화 (2026-02-21)
+
+### Environment
+ **Location**: Linux PC
+ **Zephyr Version**: 4.3.99
+ **Build Status**: ✅ SUCCESS
+
+
+---
+
+### 목적
+
+Shell에서 설정 가능한 모든 파라미터를 EEPROM에 영속 저장하여 전원 재투입 후에도 유지.
+기존 v0x03 설정 구조체에 5개의 peripheral 설정 필드를 추가 (v0x04).
+
+---
+
+### 추가된 설정 필드 (v0x04)
+
+| 필드 | 타입 | 기본값 | 범위 | 용도 |
+|------|------|--------|------|------|
+| `beep_pulse_ms` | uint16_t | 100 | 10-1000 ms | 비프 펄스 폭 |
+| `beep_filter_ms` | uint16_t | 1000 | 100-10000 ms | 비프 중복 필터 |
+| `epc_debounce_sec` | uint8_t | 1 | 0-60 sec | EPC 디바운스 |
+| `inventory_interval_ms` | uint16_t | 500 | 0-10000 ms | 인벤토리 간격 |
+| `rgb_brightness` | uint8_t | 100 | 0-100 % | RGB LED 밝기 |
+
+---
+
+### 주요 변경 사항
+
+#### 1. 설정 구조체 마이그레이션 (v3 → v4)
+
+- `e310_settings.h`: 5개 필드 추가, reserved 29→21 bytes, sizeof = 46 bytes
+- `e310_settings.c`: `BUILD_ASSERT`로 구조체 크기/CRC 오프셋 컴파일타임 검증
+- CRC 계산: `offsetof(e310_settings_t, crc16)`으로 정확히 CRC 전까지만 커버
+- v3 → v4 마이그레이션: 기존 필드 보존, 새 필드만 기본값 설정 후 저장
+
+#### 2. CRC 버그 수정
+
+- 이전 버전의 CRC는 CRC 필드 자체를 포함하여 계산하는 버그가 있었음
+- 마이그레이션 시 CRC 검증 전에 버전 체크를 먼저 수행하도록 로직 변경
+- `update_crc()` → `eeprom_write_verified()` 순서로 마이그레이션 완료
+
+#### 3. Shell 명령어 EEPROM 저장 연동
+
+각 shell 명령어에서 설정 변경 시 자동으로 EEPROM에 저장:
+
+- `beep pulse <ms>` → `e310_settings_set_beep_pulse()`
+- `beep filter <ms>` → `e310_settings_set_beep_filter()`
+- `hid speed <cpm>` → `e310_settings_set_typing_speed()`
+- `hid debounce <sec>` → `e310_settings_set_epc_debounce()`
+- `e310 interval <ms>` → `e310_settings_set_inventory_interval()`
+- `rgb brightness <percent>` → `e310_settings_set_rgb_brightness()`
+
+각 명령어에 저장 성공 시 `(saved)` 표시, 실패 시 경고 메시지 출력.
+
+#### 4. 부팅 시 설정 적용
+
+`main.c`에서 모든 모듈 초기화 후 EEPROM 저장값을 각 모듈에 적용:
+
+```c
+beep_control_set_pulse_ms(e310_settings_get_beep_pulse());
+beep_control_set_filter_ms(e310_settings_get_beep_filter());
+uart_router.epc_filter.debounce_ms = e310_settings_get_epc_debounce() * 1000;
+uart_router.inventory_interval_ms = e310_settings_get_inventory_interval();
+rgb_led_set_brightness(e310_settings_get_rgb_brightness());
+```
+
+#### 5. `e310 show` 출력 확장
+
+새로 추가된 5개 필드를 `e310 show` 셸 명령어 출력에 포함.
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── src/e310_settings.h    # 구조체 v4, 새 필드/상수/API 선언
+├── src/e310_settings.c    # 마이그레이션 로직, getter/setter, CRC 수정
+├── src/beep_control.c     # EEPROM 저장 연동 (pulse, filter)
+├── src/rgb_led.c          # EEPROM 저장 연동 (brightness)
+├── src/uart_router.c      # EEPROM 저장 연동 (speed, debounce, interval)
+├── src/main.c             # 부팅 시 EEPROM 설정 적용
+```
+
+---
+
+### 참고: 런타임 토글은 영속화하지 않음
+
+아래 설정은 이전 세션에서 결정된 대로 영속화하지 않음:
+- `usb hid on/off` — 런타임 토글
+- `beep e310 on/off` — 런타임 토글
+- `e310 debug on/off` — 런타임 토글
+
+---
+
+## Session 22: 실운영 완성도 검토 — Production Readiness Hardening (2026-02-22)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99
+- **Build Status**: ✅ SUCCESS (FLASH 143,980B 13.73%, RAM 39,112B 11.94%)
+
+---
+
+### 목적
+
+Oracle 컨설턴트를 통한 전체 코드 검토 후 발견된 이슈들을 Phase별로 수정.
+실제 제품에 적용할 수 있는 수준의 안정성과 완성도 확보.
+
+---
+
+### 감사 결과 요약
+
+Oracle이 총 15개 이슈를 식별:
+
+| 등급 | 건수 | 설명 |
+|------|------|------|
+| Critical | 3 | CRC 마이그레이션 버그, 테스트 코드 빌드 포함, 누락된 워치독 |
+| Medium | 5 | 스레드 안전성, 스택 오버플로, UART5 미구현 등 |
+| Low | 4 | 배너 오류, HID 속도 범위, 로그인 비활성화, 저전력 미사용 |
+| High | 5 | USB VID, HID muted, 비밀번호 평문, EEPROM 쓰기 병합, LSE 오류 |
+
+사용자 확인으로 제외된 항목:
+- 로그인 기능: 영구 비활성화 (수정 불필요)
+- 저전력 모드: 미사용 (수정 불필요)
+- HID muted 상태: `uart_router_start_inventory()`에서 자동 활성화되므로 문제 아님
+
+---
+
+### Phase 1: Quick Fixes (완료)
+
+#### C-3: 마이그레이션 CRC 누락
+- `e310_settings.c`: 마이그레이션 경로에서 `eeprom_write_verified()` 호출 전 `update_crc()` 추가
+
+#### M-1: 테스트 코드 빌드 포함
+- `CMakeLists.txt`: `src/e310_test.c` 제거 (파일은 유지, 빌드에서만 제외)
+
+#### L-1: 배너 클럭 정보 오류
+- `main.c`: `"275 MHz"` → `"550 MHz, HCLK: 275 MHz"`
+- STM32H723ZG의 DWT CYCCNT는 CPU 코어 클럭(550 MHz)으로 동작, AHB는 275 MHz
+
+#### L-3: HID 속도 도움말 범위 오류
+- `uart_router.c`: `<100-1500>` → `<100-12000>` (실제 `HID_TYPING_SPEED_MAX` = 12000)
+
+---
+
+### Phase 2: Watchdog — IWDG 독립 워치독 추가 (완료)
+
+#### DTS 변경
+- `nucleo_h723zg_parp01.dts`: `iwdg1` 노드 활성화 (`status = "okay"`)
+- `aliases` 블록에 `watchdog0 = &iwdg1` 추가
+
+#### Kconfig
+- `prj.conf`: `CONFIG_WATCHDOG=y`, `CONFIG_WDT_DISABLE_AT_BOOT=n` 추가
+
+#### 구현 (`main.c`)
+- IWDG 디바이스 가져오기: `DEVICE_DT_GET(DT_ALIAS(watchdog0))`
+- 타임아웃 설정: 2000ms, `WDT_FLAG_RESET_SOC`, callback=NULL (STM32 IWDG는 콜백 미지원)
+- `WDT_OPT_PAUSE_HALTED_BY_DBG`: JTAG 디버깅 시 워치독 일시정지
+- 메인 루프에서 매 반복(~10ms)마다 `wdt_feed()` 호출
+- 초기화 실패 시 graceful degradation: `wdt_channel_id = -1`이면 feed 스킵
+
+---
+
+### Phase 3: Thread Safety — switch_control.c 원자적 접근 (완료)
+
+#### 변경 내용
+- `inventory_running`: `bool` → `atomic_t` (ATOMIC_INIT(0))
+- `toggle_callback`: `volatile` 한정자 추가
+- `toggle_handler()`: `atomic_get()`/`atomic_set()`으로 토글, 로컬 `bool running` 사용
+- 콜백 호출: `toggle_callback`을 로컬 변수 `cb`에 복사 후 null 체크 및 호출 (메모리 배리어)
+- `switch_control_is_inventory_running()`: `atomic_get()` 사용
+- `switch_control_set_inventory_state()`: `atomic_set()` 사용
+- Shell 진단(`sw0 diag`): `atomic_get()` 사용
+
+---
+
+### DTS 추가 수정 (완료)
+
+#### UART5 완전 제거
+- 회로상 미구현 확인 → DTS에서 `&uart5` 블록 7줄 삭제
+
+#### RTC 클럭 소스 변경
+- LSE 활성화 시 오류 발생 → `STM32_SRC_LSI RTC_SEL(2)`로 변경
+- Zephyr 트리에서 104개 보드가 동일 패턴 사용 확인
+- LSE 주석 업데이트: `"Not available on this board (disabled)"`
+
+---
+
+### 변경된 파일
+
+```
+수정:
+├── CMakeLists.txt                                  # e310_test.c 빌드 제거
+├── boards/arm/nucleo_h723zg_parp01/nucleo_h723zg_parp01.dts  # UART5 제거, RTC→LSI, IWDG1
+├── prj.conf                                        # CONFIG_WATCHDOG 추가
+├── src/main.c                                      # WDT 초기화+feed, 배너 수정
+├── src/e310_settings.c                              # C-3 CRC 수정
+├── src/uart_router.c                                # L-3 HID 속도 범위 수정
+├── src/switch_control.c                             # 스레드 안전성 (atomic_t)
+```
+
+---
+
+### 빌드 결과
+
+```
+Memory region         Used Size  Region Size  %age Used
+           FLASH:      143980 B         1 MB     13.73%
+             RAM:       39112 B       320 KB     11.94%
+```
+
+변화: Flash 142,012B → 143,980B (+1,968B, 워치독+스레드 안전성+수정)
+
+---
+
+### 미해결 항목
+
+- **H-3**: USB VID `0x2FE3` 소유권 확인 필요 (사용자 확인 대기)
+- **H-5**: EEPROM 비밀번호 평문 저장 (로그인 영구 비활성화로 우선순위 낮음)
+- **H-1**: EEPROM 쓰기 병합 최적화 (지연, 낮은 우선순위)
+
+---
+
+### 테스트 체크리스트 (하드웨어)
+
+- [ ] 전원 재투입 후 워치독 동작 확인 (2초 이내 리셋 발생 여부)
+- [ ] JTAG 디버깅 시 워치독 일시정지 동작 확인
+- [ ] SW0 토글 시 atomic 연산 정상 동작
+- [ ] EEPROM 설정 저장/로드 (v3→v4 마이그레이션 포함)
+- [ ] `e310 show` 명령어로 모든 설정 표시 확인
