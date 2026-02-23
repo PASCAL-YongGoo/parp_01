@@ -10,7 +10,7 @@
 
 	chosen {
 		zephyr,console = &usart1;
-		zephyr,shell-uart = &usart1;
+		zephyr,shell-uart = &cdc_acm_uart0;
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,dtcm = &dtcm;
@@ -225,6 +225,11 @@ zephyr_udc0: &usbotg_hs {
 		out-report-size = <1>;
 		in-polling-period-us = <1000>;
 		out-polling-period-us = <1000>;
+	};
+
+	/* USB CDC ACM for Shell/Console (composite with HID) */
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
 	};
 };
 
