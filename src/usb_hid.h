@@ -12,6 +12,16 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+
+struct usb_hid_stats {
+	uint32_t chars_attempted;
+	uint32_t chars_sent;
+	uint32_t chars_dropped;
+	uint32_t retries;
+	uint32_t epc_sent;
+	uint32_t epc_partial;
+	uint32_t submit_errors;
+};
 /* ========================================================================
  * Typing Speed Configuration
  * ======================================================================== */
@@ -90,4 +100,7 @@ void usb_hid_set_enabled(bool enable);
  */
 bool usb_hid_is_enabled(void);
 
+
+void usb_hid_get_stats(struct usb_hid_stats *stats);
+void usb_hid_reset_stats(void);
 #endif /* USB_HID_H */

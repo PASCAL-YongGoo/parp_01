@@ -5,6 +5,7 @@
  * Thread Safety:
  * - usb_hid_send_epc() is protected by mutex (safe for concurrent calls)
  * - typing_speed_cpm uses atomic access
+ * - hid_stats uses atomic counters for lock-free statistics
  *
  * @copyright Copyright (c) 2026 PARP
  */
@@ -33,7 +34,7 @@ static const uint8_t hid_kbd_report_desc[] = HID_KEYBOARD_REPORT_DESC();
 #define HID_KBD_REPORT_SIZE 8
 
 /* ========================================================================
- * CPM to Delay Conversion Constants (Phase 4.1)
+ * Constants
  * ======================================================================== */
 
 /** Number of HID events per character (key press + key release) */
@@ -45,6 +46,12 @@ static const uint8_t hid_kbd_report_desc[] = HID_KEYBOARD_REPORT_DESC();
 /** Factor to convert CPM to delay: 60000ms / 2 events = 30000 */
 #define CPM_TO_DELAY_FACTOR     (MS_PER_MINUTE / HID_EVENTS_PER_CHAR)
 
+/** Maximum retries for a single HID report submission */
+#define HID_SUBMIT_MAX_RETRIES  5
+
+/** Delay between retries in milliseconds */
+#define HID_SUBMIT_RETRY_DELAY_MS  10
+
 /* ========================================================================
  * HID Device State
  * ======================================================================== */
@@ -55,14 +62,32 @@ static bool hid_ready = false;
 /* HID output mute state (default: true = muted for development) */
 static bool hid_muted = true;
 
-/* Phase 1.3: Atomic typing speed variable */
+/* Atomic typing speed variable */
 static atomic_t typing_speed_cpm = ATOMIC_INIT(HID_TYPING_SPEED_DEFAULT);
 
-/* Phase 2.3: Mutex for HID send protection */
+/* Mutex for HID send protection */
 static K_MUTEX_DEFINE(hid_send_lock);
 
 /* Static buffer for HID reports (DMA-aligned) */
 UDC_STATIC_BUF_DEFINE(hid_report, HID_KBD_REPORT_SIZE);
+
+/* ========================================================================
+ * Send Statistics (atomic, lock-free)
+ * ======================================================================== */
+
+static struct {
+	atomic_t chars_attempted;  /* Total characters attempted */
+	atomic_t chars_sent;       /* Successfully sent characters */
+	atomic_t chars_dropped;    /* Characters dropped after all retries exhausted */
+	atomic_t retries;          /* Total retry attempts across all sends */
+	atomic_t epc_sent;         /* Complete EPCs sent successfully */
+	atomic_t epc_partial;      /* EPCs with partial character drops */
+	atomic_t submit_errors;    /* Total hid_device_submit_report failures */
+} hid_stats;
+
+/* ========================================================================
+ * Internal Helpers
+ * ======================================================================== */
 
 /**
  * @brief Calculate key delay in ms from typing speed (CPM)
@@ -77,6 +102,48 @@ static inline uint32_t cpm_to_delay_ms(uint16_t cpm)
 		return 50; /* Safe default: ~600 CPM */
 	}
 	return CPM_TO_DELAY_FACTOR / cpm;
+}
+
+/**
+ * @brief Submit a HID report with retry logic
+ *
+ * Retries up to HID_SUBMIT_MAX_RETRIES times on transient failures
+ * (-ENOMEM, -EBUSY). Non-retryable errors (-EACCES) return immediately.
+ * Tracks retry count in statistics.
+ *
+ * @param report Report buffer to submit
+ * @param size Report size in bytes
+ * @return 0 on success, negative error code if all retries exhausted
+ */
+static int hid_submit_with_retry(const uint8_t *report, uint16_t size)
+{
+	int ret;
+
+	for (int attempt = 0; attempt <= HID_SUBMIT_MAX_RETRIES; attempt++) {
+		if (attempt > 0) {
+			atomic_inc(&hid_stats.retries);
+			k_msleep(HID_SUBMIT_RETRY_DELAY_MS);
+			LOG_DBG("HID submit retry %d/%d", attempt,
+				HID_SUBMIT_MAX_RETRIES);
+		}
+
+		ret = hid_device_submit_report(hid_dev, size, report);
+		if (ret == 0) {
+			return 0;
+		}
+
+		atomic_inc(&hid_stats.submit_errors);
+
+		/* Non-retryable errors: exit immediately */
+		if (ret == -EACCES) {
+			LOG_ERR("HID class disabled (USB disconnected?)");
+			return ret;
+		}
+	}
+
+	LOG_WRN("HID submit failed after %d retries: %d",
+		HID_SUBMIT_MAX_RETRIES, ret);
+	return ret;
 }
 
 /* ========================================================================
@@ -239,7 +306,7 @@ int parp_usb_hid_init(void)
 
 int usb_hid_send_epc(const uint8_t *epc, size_t len)
 {
-	/* Phase 3.3: Input parameter validation first */
+	/* Input parameter validation */
 	if (!epc || len == 0) {
 		return -EINVAL;
 	}
@@ -261,14 +328,15 @@ int usb_hid_send_epc(const uint8_t *epc, size_t len)
 		return -EAGAIN;
 	}
 
-	/* Phase 2.3: Lock mutex for thread safety */
+	/* Lock mutex for thread safety */
 	k_mutex_lock(&hid_send_lock, K_FOREVER);
 
-	/* Phase 1.3: Get typing speed atomically */
+	/* Get typing speed atomically */
 	uint16_t current_speed = (uint16_t)atomic_get(&typing_speed_cpm);
 	uint32_t key_delay = cpm_to_delay_ms(current_speed);
 
 	int result = 0;
+	int chars_dropped = 0;
 
 	for (size_t i = 0; i < len; i++) {
 		char c = (char)epc[i];
@@ -280,35 +348,56 @@ int usb_hid_send_epc(const uint8_t *epc, size_t len)
 			continue;
 		}
 
+		atomic_inc(&hid_stats.chars_attempted);
+
+		/* Key Press */
 		memset(hid_report, 0, HID_KBD_REPORT_SIZE);
 		hid_report[0] = modifier;
 		hid_report[2] = keycode;
-		int ret = hid_device_submit_report(hid_dev, HID_KBD_REPORT_SIZE,
-						   hid_report);
+		int ret = hid_submit_with_retry(hid_report, HID_KBD_REPORT_SIZE);
 		if (ret < 0) {
-			LOG_ERR("Failed to send key press: %d", ret);
-			result = ret;
-			goto unlock;
+			if (ret == -EACCES) {
+				/* USB disconnected: abort entire send */
+				LOG_ERR("USB disconnected during EPC send at char %zu", i);
+				result = ret;
+				goto unlock;
+			}
+			/* Transient failure: skip this character, continue with rest */
+			LOG_WRN("Dropped char '%c' at pos %zu (press failed: %d)",
+				c, i, ret);
+			chars_dropped++;
+			atomic_inc(&hid_stats.chars_dropped);
+			k_msleep(key_delay);
+			continue;
 		}
-		k_msleep(key_delay);  /* Delay between key press and release */
+		k_msleep(key_delay);
 
 		/* Key Release: all zeros */
 		memset(hid_report, 0, HID_KBD_REPORT_SIZE);
-		ret = hid_device_submit_report(hid_dev, HID_KBD_REPORT_SIZE,
-					       hid_report);
+		ret = hid_submit_with_retry(hid_report, HID_KBD_REPORT_SIZE);
 		if (ret < 0) {
-			LOG_ERR("Failed to send key release: %d", ret);
-			result = ret;
-			goto unlock;
+			if (ret == -EACCES) {
+				LOG_ERR("USB disconnected during key release at char %zu", i);
+				result = ret;
+				goto unlock;
+			}
+			/* Release failure: key may appear "stuck" briefly */
+			LOG_WRN("Key release failed for '%c' at pos %zu: %d",
+				c, i, ret);
+			chars_dropped++;
+			atomic_inc(&hid_stats.chars_dropped);
+			k_msleep(key_delay);
+			continue;
 		}
-		k_msleep(key_delay);  /* Delay between characters */
+		k_msleep(key_delay);
+
+		atomic_inc(&hid_stats.chars_sent);
 	}
 
 	/* Send Enter key (0x28) for tag separation */
 	memset(hid_report, 0, HID_KBD_REPORT_SIZE);
 	hid_report[2] = 0x28;
-	int ret = hid_device_submit_report(hid_dev, HID_KBD_REPORT_SIZE,
-					   hid_report);
+	int ret = hid_submit_with_retry(hid_report, HID_KBD_REPORT_SIZE);
 	if (ret < 0) {
 		LOG_ERR("Failed to send Enter key: %d", ret);
 		result = ret;
@@ -318,15 +407,23 @@ int usb_hid_send_epc(const uint8_t *epc, size_t len)
 
 	/* Release Enter key */
 	memset(hid_report, 0, HID_KBD_REPORT_SIZE);
-	ret = hid_device_submit_report(hid_dev, HID_KBD_REPORT_SIZE,
-				       hid_report);
+	ret = hid_submit_with_retry(hid_report, HID_KBD_REPORT_SIZE);
 	if (ret < 0) {
 		LOG_ERR("Failed to release Enter key: %d", ret);
 		result = ret;
 		goto unlock;
 	}
 
-	LOG_INF("EPC sent via HID: %.*s (speed: %u CPM)", (int)len, epc, current_speed);
+	/* Track EPC-level statistics */
+	if (chars_dropped > 0) {
+		atomic_inc(&hid_stats.epc_partial);
+		LOG_WRN("EPC sent with %d dropped chars: %.*s (speed: %u CPM)",
+			chars_dropped, (int)len, epc, current_speed);
+	} else {
+		atomic_inc(&hid_stats.epc_sent);
+		LOG_INF("EPC sent via HID: %.*s (speed: %u CPM)",
+			(int)len, epc, current_speed);
+	}
 
 unlock:
 	k_mutex_unlock(&hid_send_lock);
@@ -351,7 +448,6 @@ int usb_hid_set_typing_speed(uint16_t cpm)
 		cpm = HID_TYPING_SPEED_MAX;
 	}
 
-	/* Phase 1.3: Set atomically */
 	atomic_set(&typing_speed_cpm, cpm);
 	LOG_INF("Typing speed set to %u CPM (delay: %u ms)",
 	        cpm, cpm_to_delay_ms(cpm));
@@ -360,7 +456,6 @@ int usb_hid_set_typing_speed(uint16_t cpm)
 
 uint16_t usb_hid_get_typing_speed(void)
 {
-	/* Phase 1.3: Get atomically */
 	return (uint16_t)atomic_get(&typing_speed_cpm);
 }
 
@@ -373,4 +468,30 @@ void usb_hid_set_enabled(bool enable)
 bool usb_hid_is_enabled(void)
 {
 	return !hid_muted;
+}
+
+void usb_hid_get_stats(struct usb_hid_stats *stats)
+{
+	if (!stats) {
+		return;
+	}
+	stats->chars_attempted = (uint32_t)atomic_get(&hid_stats.chars_attempted);
+	stats->chars_sent = (uint32_t)atomic_get(&hid_stats.chars_sent);
+	stats->chars_dropped = (uint32_t)atomic_get(&hid_stats.chars_dropped);
+	stats->retries = (uint32_t)atomic_get(&hid_stats.retries);
+	stats->epc_sent = (uint32_t)atomic_get(&hid_stats.epc_sent);
+	stats->epc_partial = (uint32_t)atomic_get(&hid_stats.epc_partial);
+	stats->submit_errors = (uint32_t)atomic_get(&hid_stats.submit_errors);
+}
+
+void usb_hid_reset_stats(void)
+{
+	atomic_set(&hid_stats.chars_attempted, 0);
+	atomic_set(&hid_stats.chars_sent, 0);
+	atomic_set(&hid_stats.chars_dropped, 0);
+	atomic_set(&hid_stats.retries, 0);
+	atomic_set(&hid_stats.epc_sent, 0);
+	atomic_set(&hid_stats.epc_partial, 0);
+	atomic_set(&hid_stats.submit_errors, 0);
+	LOG_INF("HID stats reset");
 }
