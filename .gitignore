@@ -27,3 +27,8 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Temporary / scratch directories
+tmp/
+temp/
+zephyr_repo/
