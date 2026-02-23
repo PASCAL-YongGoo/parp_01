@@ -56,6 +56,25 @@ west build -b nucleo_h723zg_parp01  # This will fail!
 
 **Build Output**: All artifacts go to `$HOME/work/zephyr_ws/zephyrproject/build/`
 
+
+### Rule 4: Use /tmp for Temporary Work
+**⚠️ NEVER create temporary files or directories inside the project tree**
+
+- ❌ Do NOT clone repos, download files, or create scratch directories in `apps/parp_01/`
+- ❌ Do NOT leave temporary artifacts (e.g., `zephyr_repo/`, `tmp/`, `*.bak`) in the project
+- ✅ Use `/tmp/` or a dedicated temporary directory for all scratch work (git clone, file downloads, etc.)
+- ✅ Clean up temporary files after use
+
+```bash
+# ✅ CORRECT: clone external repos to /tmp for reference
+git clone https://github.com/zephyrproject-rtos/zephyr.git /tmp/zephyr_ref
+
+# ❌ WRONG: cloning into project directory pollutes the repo
+git clone https://github.com/zephyrproject-rtos/zephyr.git zephyr_repo
+```
+
+**Reason**: Temporary files in the project tree get picked up by git, waste disk space, and cause confusion about what belongs to the project.
+
 ## Build System
 
 ### Building the Application
