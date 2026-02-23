@@ -1,3 +1,88 @@
+## Session 26: HID Hardware Verification + Project Cleanup (2026-02-23)
+
+### Environment
+- **Location**: Linux PC
+- **Zephyr Version**: 4.3.99 (v4.3.0-1307-ge3ef835ffec7)
+- **Build Status**: ✅ (no code changes, cleanup only)
+
+---
+
+### Accomplishments
+
+#### 1. HID Character Drop Fix — Hardware Verification ✅
+
+Flashed firmware with D-Cache coherency fix (Session 25) and tested on actual hardware.
+
+**Test Parameters**: 5 RFID tags × 9 read cycles = 45 total reads
+
+| Tag | EPC | 9/9 Consistent |
+|-----|-----|:-:|
+| #1 | `85920228342142573557303101800200` | ✅ |
+| #2 | `850470002226434B3257303200700105` | ✅ |
+| #3 | `850470002242434B3257303200700105` | ✅ |
+| #4 | `850470002173434B3257303200700105` | ✅ |
+| #5 | `8601700000784A445630324203601500` | ✅ |
+
+**Error Rate Comparison**:
+
+| Metric | Before Fix (40 reads) | After Fix (45 reads) |
+|--------|:-:|:-:|
+| Character drops | 7.5% | **0%** |
+| Case errors | 5.0% | **0%** |
+| Transpositions | 2.5% | **0%** |
+
+**Root Cause Confirmed**: STM32H7 D-Cache + USB DMA coherency issue.
+`CONFIG_NOCACHE_MEMORY=y` + `CONFIG_UDC_BUF_FORCE_NOCACHE=y` completely resolved it.
+
+---
+
+#### 2. Project Cleanup
+
+- **Removed `zephyr_repo/`**: Stale Zephyr source tree clone (~300MB) that was accidentally left in project directory by a previous explore agent. Already available at `../../zephyr/`.
+- **Added `CLAUDE.md` Rule 4**: "Use /tmp for Temporary Work" — all scratch work (git clone, downloads, etc.) must use `/tmp/`, never the project tree.
+- **Updated `.gitignore`**: Added `tmp/`, `temp/`, `zephyr_repo/` to prevent future accidental commits of temporary artifacts.
+
+---
+
+#### 3. Git History (today's commits)
+
+| Commit | Description |
+|--------|-------------|
+| `03b5e29` | Fix HID character drops: retry logic, send stats, D-Cache coherency |
+| `eee5fa8` | Add USB CDC ACM shell console + WDT boot fix |
+| `83156b6` | Update session notes with Sessions 23-25 and HID test results |
+| `d496b71` | Add Rule 4: use /tmp for temporary work, remove stale zephyr_repo |
+| `f881a4f` | Add tmp/, temp/, zephyr_repo/ to .gitignore |
+
+---
+
+### Files Modified
+
+```
+CLAUDE.md            # Added Rule 4 (temporary work in /tmp)
+.gitignore           # Added tmp/, temp/, zephyr_repo/
+docs/SESSION_NOTES.md  # Added Sessions 23-26, HID test results
+```
+
+---
+
+### Current Project Status
+
+- ✅ HID keyboard output: **0% error rate** (verified on hardware)
+- ✅ WDT: Boot loop fixed (`CONFIG_WDT_DISABLE_AT_BOOT=y`)
+- ✅ USB CDC ACM: Shell console over USB (single cable operation)
+- ✅ D-Cache: USB DMA buffers in nocache memory region
+- ⬜ CDC ACM shell: Hardware test pending (composite HID + CDC)
+
+### Next Steps
+
+1. **Hardware test**: USB CDC ACM shell — verify shell prompt appears on `/dev/ttyACM0`
+2. **Hardware test**: Composite device stability (HID + CDC ACM simultaneous)
+3. **Feature**: Consider `CONFIG_LOG_PROCESS_THREAD_STARTUP_DELAY_MS` if deferred logs lost before USB ready
+
+---
+
+
 ## Session 25: D-Cache Coherency Fix — Root Cause of HID Character Drops (2026-02-23)
 
 ### Environment
